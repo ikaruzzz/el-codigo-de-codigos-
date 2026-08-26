@@ -1,7 +1,6 @@
 --[[
-    Driving Empire - Delivery por círculos AMARILLOS
-    Detecta círculos amarillos medianos-grandes (zona de 4 paquetes)
-    Se teletransporta dentro y repite el ciclo de recogida/entrega
+    Driving Empire - Solo círculos de Delivery (recogida + entrega)
+    Basado en las capturas: anillo amarillo/naranja + paquetes o pin
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -16,27 +15,23 @@ if player.PlayerGui:FindFirstChild("DeliveryYellowCircles") then
     player.PlayerGui.DeliveryYellowCircles:Destroy()
 end
 
--- ====================== CONFIG ======================
 local CONFIG = {
-    WaitInCircle = 3.0,     -- tiempo dentro del círculo
-    BetweenCircles = 0.8,   -- pausa al cambiar de círculo
-    RescanDelay = 1.5,      -- si no encuentra ninguno
-    MaxDistance = 5000,
+    WaitInCircle = 3.2,
+    BetweenTargets = 1.0,
+    RescanDelay = 1.5,
+    MaxDistance = 6000,
 
-    -- Tamaño del círculo (mediano-grande)
-    MinSize = 6,            -- diámetro mínimo aprox
-    MaxSize = 40,           -- diámetro máximo aprox
-    MaxHeight = 4,          -- que sea relativamente plano
-
-    -- Color amarillo (tolerancia)
-    YellowTolerance = 0.35,
+    -- Anillo mediano-grande (como en las fotos)
+    MinDiameter = 12,
+    MaxDiameter = 55,
+    MaxHeight = 3.5,
 }
 
 local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 
 local running = false
-local lastTarget = nil
+local lastPos = nil
 
 -- ====================== GUI ======================
 local gui = Instance.new("ScreenGui")
@@ -55,7 +50,7 @@ Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundTransparency = 1
-title.Text = "Delivery · Círculos 🟡"
+title.Text = "Delivery · Zonas reales"
 title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 14
@@ -108,7 +103,7 @@ end
 local function tpTo(pos)
     local root = getHRP()
     if root and pos then
-        root.CFrame = CFrame.new(pos + Vector3.new(0, 3.5, 0))
+        root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
         return true
     end
     return false
@@ -121,83 +116,93 @@ local function tryAcceptJob()
     task.wait(0.7)
 end
 
--- ¿Es color amarillo / dorado?
-local function isYellow(color)
+local function isYellowOrange(color)
     if typeof(color) ~= "Color3" then return false end
     local r, g, b = color.R, color.G, color.B
-    -- Amarillo: R y G altos, B más bajo
-    return r > 0.55 and g > 0.45 and b < 0.55 and (r + g) > (b * 2.2)
+    -- Amarillo / naranja dorado (como en las fotos)
+    return r > 0.6 and g > 0.35 and b < 0.45 and r >= g * 0.85
 end
 
--- ¿Tamaño de círculo mediano-grande y plano?
-local function isMediumLargeFlat(part)
+local function isRingShape(part)
     local s = part.Size
     local diameter = math.max(s.X, s.Z)
-    local height = s.Y
-    return diameter >= CONFIG.MinSize
-        and diameter <= CONFIG.MaxSize
-        and height <= CONFIG.MaxHeight
+    return diameter >= CONFIG.MinDiameter
+        and diameter <= CONFIG.MaxDiameter
+        and s.Y <= CONFIG.MaxHeight
+        and math.abs(s.X - s.Z) < 8 -- casi redondo
 end
 
-local function scoreCircle(part, rootPos)
-    local score = 0
-    local s = part.Size
-    local diameter = math.max(s.X, s.Z)
-
-    if isYellow(part.Color) then score += 50 end
-    if part.Material == Enum.Material.Neon then score += 15 end
-    if part.Transparency > 0.15 and part.Transparency < 0.95 then score += 10 end
-    if isMediumLargeFlat(part) then score += 25 end
-
-    -- Preferir discos casi redondos
-    if math.abs(s.X - s.Z) < 3 then score += 10 end
-
-    local name = string.lower(part.Name)
-    if string.find(name, "circle") or string.find(name, "zone")
-    or string.find(name, "marker") or string.find(name, "package")
-    or string.find(name, "delivery") or string.find(name, "pickup") then
-        score += 20
+-- ¿Hay cajas/paquetes cerca? (zona de recogida)
+local function hasPackagesNearby(center, radius)
+    radius = radius or 25
+    local n = 0
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local name = string.lower(obj.Name)
+            if string.find(name, "box") or string.find(name, "package")
+            or string.find(name, "parcel") or string.find(name, "crate")
+            or string.find(name, "cardboard") then
+                local part = obj:IsA("BasePart") and obj or (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart"))
+                if part and (part.Position - center).Magnitude <= radius then
+                    n += 1
+                end
+            end
+        end
     end
-
-    local dist = (part.Position - rootPos).Magnitude
-    -- un poco de preferencia a los más cercanos, sin ser lo único
-    score += math.max(0, 30 - (dist / 100))
-
-    return score, dist
+    return n
 end
 
-local function findYellowCircles()
+local function findDeliveryRings()
     local root = getHRP()
     if not root then return {} end
     local rootPos = root.Position
     local results = {}
 
     for _, obj in pairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") then
+        if obj:IsA("BasePart") and isRingShape(obj) then
             local dist = (obj.Position - rootPos).Magnitude
             if dist <= CONFIG.MaxDistance then
-                -- Filtro rápido: amarillo O forma de círculo mediano
-                if isYellow(obj.Color) or isMediumLargeFlat(obj) then
-                    if isMediumLargeFlat(obj) or isYellow(obj.Color) then
-                        local sc, d = scoreCircle(obj, rootPos)
-                        if sc >= 40 then -- umbral mínimo
-                            table.insert(results, {
-                                part = obj,
-                                score = sc,
-                                distance = d,
-                                name = obj.Name
-                            })
-                        end
-                    end
+                local score = 0
+
+                if isYellowOrange(obj.Color) then score += 40 end
+                if obj.Material == Enum.Material.Neon then score += 15 end
+                if obj.Transparency > 0.05 and obj.Transparency < 0.9 then score += 10 end
+
+                local packages = hasPackagesNearby(obj.Position, math.max(obj.Size.X, obj.Size.Z) * 0.7)
+                if packages >= 1 then
+                    score += 35 -- muy probable zona de recogida
+                end
+
+                local name = string.lower(obj.Name)
+                local parent = obj.Parent and string.lower(obj.Parent.Name) or ""
+                if string.find(name, "circle") or string.find(name, "ring")
+                or string.find(name, "zone") or string.find(name, "marker")
+                or string.find(name, "delivery") or string.find(name, "pickup")
+                or string.find(parent, "delivery") or string.find(parent, "job") then
+                    score += 25
+                end
+
+                -- Evitar el mismo sitio que acabamos de visitar
+                if lastPos and (obj.Position - lastPos).Magnitude < 8 then
+                    score -= 20
+                end
+
+                if score >= 45 then
+                    table.insert(results, {
+                        part = obj,
+                        score = score,
+                        distance = dist,
+                        packages = packages,
+                        name = obj.Name,
+                        kind = packages >= 1 and "PICKUP" or "DELIVERY?"
+                    })
                 end
             end
         end
     end
 
     table.sort(results, function(a, b)
-        if a.score == b.score then
-            return a.distance < b.distance
-        end
+        if a.score == b.score then return a.distance < b.distance end
         return a.score > b.score
     end)
 
@@ -207,56 +212,47 @@ end
 -- ====================== LOOP ======================
 local function farmLoop()
     tryAcceptJob()
-    setStatus("Trabajo aceptado\nBuscando círculos amarillos...")
+    setStatus("Buscando anillos\nde Delivery...")
 
     while running do
-        local circles = findYellowCircles()
+        local rings = findDeliveryRings()
 
-        if #circles == 0 then
-            setStatus("No hay círculos amarillos\nReintentando...")
+        if #rings == 0 then
+            setStatus("Sin anillos válidos\nReintentando...")
             tryAcceptJob()
             task.wait(CONFIG.RescanDelay)
         else
-            setStatus("Círculos encontrados: " .. #circles)
-
-            for i, data in ipairs(circles) do
+            for i, data in ipairs(rings) do
                 if not running then break end
-
-                -- Evitar repetir el mismo al instante
-                if lastTarget == data.part and #circles > 1 then
-                    continue
-                end
-
                 if data.part and data.part.Parent then
-                    lastTarget = data.part
+                    lastPos = data.part.Position
                     setStatus(string.format(
-                        "Círculo %d/%d\n%s | score=%d",
-                        i, #circles, data.name, math.floor(data.score)
+                        "%s %d/%d\n%s | cajas≈%d",
+                        data.kind, i, #rings, data.name, data.packages
                     ))
 
                     tpTo(data.part.Position)
                     task.wait(CONFIG.WaitInCircle)
 
-                    -- Pequeño movimiento para “activar” la zona
+                    -- Micro-movimiento para activar la zona
                     local root = getHRP()
                     if root then
-                        root.CFrame = root.CFrame * CFrame.new(0, 0, 1)
-                        task.wait(0.2)
-                        root.CFrame = root.CFrame * CFrame.new(0, 0, -1)
+                        root.CFrame = root.CFrame * CFrame.new(1, 0, 0)
+                        task.wait(0.25)
+                        root.CFrame = root.CFrame * CFrame.new(-1, 0, 0)
                     end
 
-                    task.wait(CONFIG.BetweenCircles)
+                    task.wait(CONFIG.BetweenTargets)
                 end
             end
         end
 
-        task.wait(0.4)
+        task.wait(0.35)
     end
 
     setStatus("Detenido")
 end
 
--- ====================== BOTONES ======================
 startBtn.MouseButton1Click:Connect(function()
     if running then return end
     running = true
@@ -267,7 +263,7 @@ end)
 
 stopBtn.MouseButton1Click:Connect(function()
     running = false
-    lastTarget = nil
+    lastPos = nil
     startBtn.Text = "INICIAR"
     startBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
     setStatus("Detenido")
@@ -277,4 +273,4 @@ player.CharacterAdded:Connect(function(char)
     char:WaitForChild("HumanoidRootPart")
 end)
 
-print("[DELIVERY] Círculos amarillos listo")
+print("[DELIVERY] Filtro de anillos amarillos/naranja listo")
