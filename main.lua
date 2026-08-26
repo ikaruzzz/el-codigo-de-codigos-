@@ -1,5 +1,5 @@
--- Driving Empire Farm GUI (Adaptado)
--- Detecta ATMs automáticamente + sistema de límite
+-- Driving Empire Farm - Versión mejorada ATM + Delivery
+-- ATM ahora intenta robar de verdad y pasa al siguiente
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
@@ -8,8 +8,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 
 repeat task.wait() until player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-local character = player.Character
-local hrp = character:WaitForChild("HumanoidRootPart")
 
 if player.PlayerGui:FindFirstChild("FarmGui") then
     player.PlayerGui.FarmGui:Destroy()
@@ -17,19 +15,25 @@ end
 
 -- ====================== CONFIG ======================
 local CONFIG = {
-    MoneyLimit = 50000,          -- Límite para entregar (cámbialo desde el menú)
-    ATMWaitTime = 4.5,           -- Tiempo entre cada ATM (recomendado 4-6)
-    DeliveryWaitTime = 2.5,
+    MoneyLimit = 50000,
+    ATMWaitTime = 5.5,       -- Tiempo de espera después de iniciar el robo (importante)
+    BetweenATM = 1.2,        -- Tiempo entre un ATM y el siguiente
+    DeliveryWaitTime = 2.8,
 }
 
 -- ====================== REMOTES ======================
-local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
-local bustStart = remotes and remotes:FindFirstChild("AttemptATMBustStart")
-local bustEnd = remotes and remotes:FindFirstChild("AttemptATMBustComplete")
-local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
-local endJob = remotes and remotes:FindFirstChild("RequestEndJobSession")
+local remotes = ReplicatedStorage:WaitForChild("Remotes", 8)
 
--- ====================== GUI ======================
+local function getRemote(name)
+    return remotes and remotes:FindFirstChild(name)
+end
+
+local bustStart = getRemote("AttemptATMBustStart")
+local bustEnd   = getRemote("AttemptATMBustComplete")
+local startJob  = getRemote("RequestStartJobSession")
+local endJob    = getRemote("RequestEndJobSession")
+
+-- ====================== GUI (igual que antes) ======================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "FarmGui"
 screenGui.ResetOnSpawn = false
@@ -41,8 +45,8 @@ panel.Position = UDim2.new(1, -195, 0.5, -170)
 panel.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 panel.BorderSizePixel = 0
 panel.Parent = screenGui
-
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+
 local stroke = Instance.new("UIStroke", panel)
 stroke.Color = Color3.fromRGB(60, 60, 70)
 stroke.Thickness = 1.5
@@ -112,7 +116,6 @@ limitBox.Text = tostring(CONFIG.MoneyLimit)
 limitBox.TextColor3 = Color3.new(1,1,1)
 limitBox.Font = Enum.Font.GothamBold
 limitBox.TextSize = 14
-limitBox.PlaceholderText = "Ej: 50000"
 limitBox.Parent = content
 Instance.new("UICorner", limitBox).CornerRadius = UDim.new(0, 6)
 
@@ -131,7 +134,7 @@ local infoLabel = Instance.new("TextLabel")
 infoLabel.Size = UDim2.new(1, -16, 0, 100)
 infoLabel.Position = UDim2.new(0, 8, 0, 195)
 infoLabel.BackgroundTransparency = 1
-infoLabel.Text = "Listo para farmear\n\nATM detecta automáticamente"
+infoLabel.Text = "Listo\n\nATM intenta robar de verdad"
 infoLabel.TextColor3 = Color3.fromRGB(180,180,190)
 infoLabel.Font = Enum.Font.Gotham
 infoLabel.TextSize = 12
@@ -147,8 +150,9 @@ local originalSize = panel.Size
 -- ====================== FUNCIONES ======================
 
 local function getHRP()
-    if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-        return player.Character.HumanoidRootPart
+    local char = player.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        return char.HumanoidRootPart
     end
     return nil
 end
@@ -165,53 +169,63 @@ end
 -- Detectar ATMs disponibles
 local function getAvailableATMs()
     local list = {}
-    local spawners = workspace:FindFirstChild("Game") 
-        and workspace.Game:FindFirstChild("Jobs") 
-        and workspace.Game.Jobs:FindFirstChild("CriminalATMSpawners")
+    local ok, spawners = pcall(function()
+        return workspace.Game.Jobs.CriminalATMSpawners
+    end)
     
-    if not spawners then return list end
+    if not ok or not spawners then return list end
     
     for _, spawner in ipairs(spawners:GetChildren()) do
         local atm = spawner:FindFirstChild("CriminalATM")
         if atm and atm:GetAttribute("State") == "Normal" then
-            table.insert(list, {spawner = spawner, atm = atm})
+            table.insert(list, {
+                spawner = spawner,
+                atm = atm,
+                pos = spawner:IsA("BasePart") and spawner.Position or (spawner:FindFirstChildWhichIsA("BasePart") and spawner:FindFirstChildWhichIsA("BasePart").Position)
+            })
         end
     end
     return list
 end
 
--- Unirse al trabajo Outlaw
+-- Unirse a Outlaw
 local function joinOutlaw()
     if startJob then
         pcall(function()
             startJob:FireServer("Criminal", "jobPad")
         end)
+        task.wait(0.6)
     end
 end
 
--- Robar un ATM
+-- Robar ATM de verdad
 local function robATM(data)
     local root = getHRP()
-    if not root then return end
+    if not root or not data.pos then return false end
     
-    -- Teletransporte cerca del ATM
-    root.CFrame = CFrame.new(data.spawner.Position + Vector3.new(0, 4, 0))
-    task.wait(0.35)
+    -- 1. Teletransporte al ATM
+    root.CFrame = CFrame.new(data.pos + Vector3.new(0, 5, 0))
+    task.wait(0.4)
     
-    -- Iniciar el robo
+    -- 2. Iniciar el robo
     if bustStart then
-        pcall(function()
+        local success = pcall(function()
             if bustStart:IsA("RemoteFunction") then
                 bustStart:InvokeServer(data.atm)
             else
                 bustStart:FireServer(data.atm)
             end
         end)
+        
+        if success then
+            infoLabel.Text = "Robando ATM...\nEsperando..."
+        end
     end
     
-    task.wait(0.8)
+    -- 3. Esperar a que el robo procese
+    task.wait(CONFIG.ATMWaitTime)
     
-    -- Completar
+    -- 4. Intentar completar (algunos servidores lo necesitan)
     if bustEnd then
         pcall(function()
             if bustEnd:IsA("RemoteFunction") then
@@ -221,63 +235,67 @@ local function robATM(data)
             end
         end)
     end
+    
+    return true
 end
 
--- Aplicar límite
 local function applyLimit()
-    local num = tonumber(limitBox.Text:gsub("%D", ""))
+    local num = tonumber((limitBox.Text or ""):gsub("%D", ""))
     if num and num > 0 then
         CONFIG.MoneyLimit = num
         limitBox.Text = tostring(num)
-        infoLabel.Text = "Límite: $" .. num .. "\n\nAl llegar entrega y sigue"
+        infoLabel.Text = "Límite: $" .. num
     else
-        infoLabel.Text = "Número inválido"
         limitBox.Text = tostring(CONFIG.MoneyLimit)
     end
 end
 
--- Toggle ATM
+-- ====================== TOGGLE ATM (MEJORADO) ======================
 local function toggleATM()
     atmFarming = not atmFarming
     
     if atmFarming then
         atmBtn.Text = "ATM AutoFarm: ON"
         atmBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
+        
+        -- Unirse al trabajo
         joinOutlaw()
+        infoLabel.Text = "Unido a Outlaw\nBuscando ATMs..."
         
         task.spawn(function()
             while atmFarming do
-                local money = getCurrentMoney()
-                
-                if money >= CONFIG.MoneyLimit then
-                    infoLabel.Text = "¡Límite alcanzado!\nEntregando..."
-                    -- Aquí podrías teletransportar a la base de Outlaws
-                    -- Por ahora solo avisa
-                    task.wait(2)
-                end
-                
                 local atms = getAvailableATMs()
+                
                 if #atms == 0 then
-                    infoLabel.Text = "Buscando ATMs...\nNinguno disponible"
-                    task.wait(2)
+                    infoLabel.Text = "No hay ATMs disponibles\nReintentando..."
+                    task.wait(2.5)
                 else
-                    for _, data in ipairs(atms) do
+                    for i, data in ipairs(atms) do
                         if not atmFarming then break end
+                        
+                        infoLabel.Text = "ATM " .. i .. "/" .. #atms .. "\nRobando..."
                         robATM(data)
-                        infoLabel.Text = "Robando ATM...\nDisponibles: " .. #atms
-                        task.wait(CONFIG.ATMWaitTime)
+                        
+                        -- Pequeña pausa antes del siguiente
+                        task.wait(CONFIG.BetweenATM)
+                        
+                        -- Revisar dinero
+                        local money = getCurrentMoney()
+                        infoLabel.Text = "Dinero: $" .. money .. "\nLímite: $" .. CONFIG.MoneyLimit
                     end
                 end
-                task.wait(0.5)
+                
+                task.wait(0.8)
             end
         end)
     else
         atmBtn.Text = "ATM AutoFarm: OFF"
         atmBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+        infoLabel.Text = "ATM detenido"
     end
 end
 
--- Toggle Delivery (búsqueda básica)
+-- ====================== DELIVERY (MEJORADO) ======================
 local function toggleDelivery()
     deliveryFarming = not deliveryFarming
     
@@ -287,30 +305,39 @@ local function toggleDelivery()
         
         task.spawn(function()
             while deliveryFarming do
-                -- Busca objetos que parezcan puntos de delivery
                 local found = false
+                local root = getHRP()
+                
+                -- Busca de forma más agresiva
                 for _, obj in pairs(workspace:GetDescendants()) do
                     if not deliveryFarming then break end
+                    
                     local name = string.lower(obj.Name)
-                    if (string.find(name, "package") or string.find(name, "delivery") or string.find(name, "dropoff") or string.find(name, "pickup")) 
-                       and (obj:IsA("BasePart") or obj:IsA("Model")) then
-                        local part = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
-                        if part then
-                            local root = getHRP()
-                            if root then
-                                root.CFrame = CFrame.new(part.Position + Vector3.new(0, 5, 0))
-                                infoLabel.Text = "Yendo a punto Delivery..."
+                    if obj:IsA("BasePart") or obj:IsA("Model") then
+                        if string.find(name, "package") 
+                        or string.find(name, "delivery") 
+                        or string.find(name, "drop") 
+                        or string.find(name, "pickup")
+                        or string.find(name, "parcel")
+                        or string.find(name, "box") then
+                            
+                            local part = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
+                            if part and root then
+                                root.CFrame = CFrame.new(part.Position + Vector3.new(0, 6, 0))
+                                infoLabel.Text = "Delivery: " .. obj.Name
                                 found = true
                                 task.wait(CONFIG.DeliveryWaitTime)
                             end
                         end
                     end
                 end
+                
                 if not found then
-                    infoLabel.Text = "Buscando puntos Delivery...\nNo se encontraron"
+                    infoLabel.Text = "No se encontraron\npuntos de Delivery"
                     task.wait(2)
                 end
-                task.wait(0.4)
+                
+                task.wait(0.5)
             end
         end)
     else
@@ -326,7 +353,7 @@ local function stopAll()
     atmBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
     deliveryBtn.Text = "Delivery AutoFarm: OFF"
     deliveryBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
-    infoLabel.Text = "Farmeo finalizado"
+    infoLabel.Text = "Todo detenido"
 end
 
 local function toggleMinimize()
@@ -348,11 +375,10 @@ deliveryBtn.MouseButton1Click:Connect(toggleDelivery)
 stopBtn.MouseButton1Click:Connect(stopAll)
 applyBtn.MouseButton1Click:Connect(applyLimit)
 minimizeBtn.MouseButton1Click:Connect(toggleMinimize)
-limitBox.FocusLost:Connect(function(enter) if enter then applyLimit() end end)
+limitBox.FocusLost:Connect(function(e) if e then applyLimit() end end)
 
 player.CharacterAdded:Connect(function(char)
-    character = char
-    hrp = char:WaitForChild("HumanoidRootPart")
+    char:WaitForChild("HumanoidRootPart")
 end)
 
-print("✅ Driving Empire Farm cargado - Detecta ATMs automáticamente")
+print("✅ Script mejorado cargado - ATM intenta robar de verdad")
