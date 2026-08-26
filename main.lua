@@ -1,144 +1,104 @@
--- Farm GUI optimizado para Delta Executor
--- Autor: [Tu Nombre]
+-- Driving Empire Farm GUI (Adaptado)
+-- Detecta ATMs automáticamente + sistema de límite
 
-if not game:IsLoaded() then
-    game.Loaded:Wait()
-end
+if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 
-repeat task.wait() until player and player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-
+repeat task.wait() until player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 local character = player.Character
-local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local hrp = character:WaitForChild("HumanoidRootPart")
 
 if player.PlayerGui:FindFirstChild("FarmGui") then
     player.PlayerGui.FarmGui:Destroy()
 end
 
+-- ====================== CONFIG ======================
 local CONFIG = {
-    ButtonSize = UDim2.new(0, 160, 0, 34),
-    PrimaryColor = Color3.fromRGB(0, 170, 80),
-    SecondaryColor = Color3.fromRGB(0, 120, 255),
-    AccentColor = Color3.fromRGB(255, 170, 0),
-    StopColor = Color3.fromRGB(200, 40, 40),
-    BackgroundColor = Color3.fromRGB(22, 22, 28),
-    TextColor = Color3.fromRGB(255, 255, 255),
-    PanelPosition = UDim2.new(1, -185, 1, -380),
-
-    ATMPositions = {
-        Vector3.new(100, 5, 50),
-        Vector3.new(150, 5, 80),
-        Vector3.new(200, 5, 30),
-    },
-    ATMRemote = "WithdrawMoney",
-    ATMPrompt = "ATMPrompt",
-    ATMWaitTime = 1.1,
-
-    MoneyLimit = 50000,
-    MoneyValueName = "Money",
-
-    DeliveryPosition = Vector3.new(0, 10, 0),
-    DeliveryRemote = "DeliverItem",
-    DeliveryPrompt = "DeliveryPrompt",
-
-    PackageNames = {"Package", "Box", "Delivery", "Parcel", "Caja", "Paquete", "Pickup"},
-    DeliveryWaitTime = 1.3,
+    MoneyLimit = 50000,          -- Límite para entregar (cámbialo desde el menú)
+    ATMWaitTime = 4.5,           -- Tiempo entre cada ATM (recomendado 4-6)
+    DeliveryWaitTime = 2.5,
 }
 
+-- ====================== REMOTES ======================
+local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local bustStart = remotes and remotes:FindFirstChild("AttemptATMBustStart")
+local bustEnd = remotes and remotes:FindFirstChild("AttemptATMBustComplete")
+local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
+local endJob = remotes and remotes:FindFirstChild("RequestEndJobSession")
+
+-- ====================== GUI ======================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "FarmGui"
 screenGui.ResetOnSpawn = false
-screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = player:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
-panel.Name = "MainPanel"
-panel.Size = UDim2.new(0, 175, 0, 360)
-panel.Position = CONFIG.PanelPosition
-panel.BackgroundColor3 = CONFIG.BackgroundColor
+panel.Size = UDim2.new(0, 180, 0, 340)
+panel.Position = UDim2.new(1, -195, 0.5, -170)
+panel.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 panel.BorderSizePixel = 0
 panel.Parent = screenGui
 
-local panelCorner = Instance.new("UICorner")
-panelCorner.CornerRadius = UDim.new(0, 12)
-panelCorner.Parent = panel
-
-local panelStroke = Instance.new("UIStroke")
-panelStroke.Color = Color3.fromRGB(55, 55, 65)
-panelStroke.Thickness = 1.5
-panelStroke.Parent = panel
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+local stroke = Instance.new("UIStroke", panel)
+stroke.Color = Color3.fromRGB(60, 60, 70)
+stroke.Thickness = 1.5
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -40, 0, 28)
-title.Position = UDim2.new(0, 10, 0, 5)
+title.Position = UDim2.new(0, 10, 0, 6)
 title.BackgroundTransparency = 1
-title.Text = "Farm Menu"
-title.TextColor3 = CONFIG.TextColor
+title.Text = "Driving Empire Farm"
+title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 16
+title.TextSize = 15
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = panel
 
 local minimizeBtn = Instance.new("TextButton")
-minimizeBtn.Size = UDim2.new(0, 28, 0, 28)
-minimizeBtn.Position = UDim2.new(1, -33, 0, 5)
-minimizeBtn.BackgroundColor3 = CONFIG.AccentColor
+minimizeBtn.Size = UDim2.new(0, 26, 0, 26)
+minimizeBtn.Position = UDim2.new(1, -32, 0, 6)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(255, 170, 0)
 minimizeBtn.Text = "−"
-minimizeBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+minimizeBtn.TextColor3 = Color3.new(0,0,0)
 minimizeBtn.Font = Enum.Font.GothamBold
-minimizeBtn.TextSize = 20
-minimizeBtn.BorderSizePixel = 0
+minimizeBtn.TextSize = 18
 minimizeBtn.Parent = panel
-
-local minCorner = Instance.new("UICorner")
-minCorner.CornerRadius = UDim.new(0, 6)
-minCorner.Parent = minimizeBtn
+Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 6)
 
 local content = Instance.new("Frame")
-content.Name = "Content"
 content.Size = UDim2.new(1, 0, 1, -35)
 content.Position = UDim2.new(0, 0, 0, 35)
 content.BackgroundTransparency = 1
 content.Parent = panel
 
-local deliveryBtn = Instance.new("TextButton")
-deliveryBtn.Size = CONFIG.ButtonSize
-deliveryBtn.Position = UDim2.new(0.5, -80, 0, 5)
-deliveryBtn.BackgroundColor3 = CONFIG.PrimaryColor
-deliveryBtn.Text = "Delivery AutoFarm: OFF"
-deliveryBtn.TextColor3 = CONFIG.TextColor
-deliveryBtn.Font = Enum.Font.GothamBold
-deliveryBtn.TextSize = 12
-deliveryBtn.BorderSizePixel = 0
-deliveryBtn.Parent = content
+local function createBtn(text, posY, color)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 160, 0, 34)
+    btn.Position = UDim2.new(0.5, -80, 0, posY)
+    btn.BackgroundColor3 = color
+    btn.Text = text
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.Parent = content
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    return btn
+end
 
-local dCorner = Instance.new("UICorner")
-dCorner.CornerRadius = UDim.new(0, 8)
-dCorner.Parent = deliveryBtn
-
-local atmBtn = Instance.new("TextButton")
-atmBtn.Size = CONFIG.ButtonSize
-atmBtn.Position = UDim2.new(0.5, -80, 0, 45)
-atmBtn.BackgroundColor3 = CONFIG.SecondaryColor
-atmBtn.Text = "ATM AutoFarm: OFF"
-atmBtn.TextColor3 = CONFIG.TextColor
-atmBtn.Font = Enum.Font.GothamBold
-atmBtn.TextSize = 12
-atmBtn.BorderSizePixel = 0
-atmBtn.Parent = content
-
-local aCorner = Instance.new("UICorner")
-aCorner.CornerRadius = UDim.new(0, 8)
-aCorner.Parent = atmBtn
+local atmBtn = createBtn("ATM AutoFarm: OFF", 5, Color3.fromRGB(0, 120, 255))
+local deliveryBtn = createBtn("Delivery AutoFarm: OFF", 45, Color3.fromRGB(0, 170, 80))
+local stopBtn = createBtn("FINALIZAR FARMEO", 150, Color3.fromRGB(200, 40, 40))
 
 local limitTitle = Instance.new("TextLabel")
 limitTitle.Size = UDim2.new(1, -20, 0, 18)
 limitTitle.Position = UDim2.new(0, 10, 0, 90)
 limitTitle.BackgroundTransparency = 1
 limitTitle.Text = "Límite para entregar:"
-limitTitle.TextColor3 = Color3.fromRGB(200, 200, 210)
+limitTitle.TextColor3 = Color3.fromRGB(200,200,210)
 limitTitle.Font = Enum.Font.Gotham
 limitTitle.TextSize = 12
 limitTitle.TextXAlignment = Enum.TextXAlignment.Left
@@ -147,167 +107,177 @@ limitTitle.Parent = content
 local limitBox = Instance.new("TextBox")
 limitBox.Size = UDim2.new(0, 100, 0, 28)
 limitBox.Position = UDim2.new(0, 10, 0, 110)
-limitBox.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+limitBox.BackgroundColor3 = Color3.fromRGB(40,40,50)
 limitBox.Text = tostring(CONFIG.MoneyLimit)
-limitBox.TextColor3 = CONFIG.TextColor
+limitBox.TextColor3 = Color3.new(1,1,1)
 limitBox.Font = Enum.Font.GothamBold
 limitBox.TextSize = 14
 limitBox.PlaceholderText = "Ej: 50000"
-limitBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
-limitBox.ClearTextOnFocus = false
-limitBox.BorderSizePixel = 0
 limitBox.Parent = content
-
-local boxCorner = Instance.new("UICorner")
-boxCorner.CornerRadius = UDim.new(0, 6)
-boxCorner.Parent = limitBox
+Instance.new("UICorner", limitBox).CornerRadius = UDim.new(0, 6)
 
 local applyBtn = Instance.new("TextButton")
 applyBtn.Size = UDim2.new(0, 50, 0, 28)
 applyBtn.Position = UDim2.new(0, 115, 0, 110)
 applyBtn.BackgroundColor3 = Color3.fromRGB(140, 60, 200)
 applyBtn.Text = "OK"
-applyBtn.TextColor3 = CONFIG.TextColor
+applyBtn.TextColor3 = Color3.new(1,1,1)
 applyBtn.Font = Enum.Font.GothamBold
 applyBtn.TextSize = 14
-applyBtn.BorderSizePixel = 0
 applyBtn.Parent = content
-
-local applyCorner = Instance.new("UICorner")
-applyCorner.CornerRadius = UDim.new(0, 6)
-applyCorner.Parent = applyBtn
-
-local stopBtn = Instance.new("TextButton")
-stopBtn.Size = UDim2.new(0, 160, 0, 36)
-stopBtn.Position = UDim2.new(0.5, -80, 0, 150)
-stopBtn.BackgroundColor3 = CONFIG.StopColor
-stopBtn.Text = "FINALIZAR FARMEO"
-stopBtn.TextColor3 = CONFIG.TextColor
-stopBtn.Font = Enum.Font.GothamBold
-stopBtn.TextSize = 13
-stopBtn.BorderSizePixel = 0
-stopBtn.Parent = content
-
-local stopCorner = Instance.new("UICorner")
-stopCorner.CornerRadius = UDim.new(0, 8)
-stopCorner.Parent = stopBtn
+Instance.new("UICorner", applyBtn).CornerRadius = UDim.new(0, 6)
 
 local infoLabel = Instance.new("TextLabel")
-infoLabel.Size = UDim2.new(1, -16, 0, 90)
-infoLabel.Position = UDim2.new(0, 8, 0, 200)
+infoLabel.Size = UDim2.new(1, -16, 0, 100)
+infoLabel.Position = UDim2.new(0, 8, 0, 195)
 infoLabel.BackgroundTransparency = 1
-infoLabel.Text = "Límite: $" .. CONFIG.MoneyLimit .. "\n\nAl llegar al límite\nentrega y sigue farmeando"
-infoLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+infoLabel.Text = "Listo para farmear\n\nATM detecta automáticamente"
+infoLabel.TextColor3 = Color3.fromRGB(180,180,190)
 infoLabel.Font = Enum.Font.Gotham
 infoLabel.TextSize = 12
 infoLabel.TextYAlignment = Enum.TextYAlignment.Top
 infoLabel.Parent = content
 
+-- ====================== VARIABLES ======================
 local atmFarming = false
 local deliveryFarming = false
 local isMinimized = false
 local originalSize = panel.Size
 
-local function getCurrentMoney()
-    local leaderstats = player:FindFirstChild("leaderstats")
-    if leaderstats then
-        local money = leaderstats:FindFirstChild(CONFIG.MoneyValueName) 
-            or leaderstats:FindFirstChild("Cash") 
-            or leaderstats:FindFirstChild("Money")
-        if money then return money.Value end
+-- ====================== FUNCIONES ======================
+
+local function getHRP()
+    if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+        return player.Character.HumanoidRootPart
     end
-    local attr = player:GetAttribute(CONFIG.MoneyValueName) 
-        or player:GetAttribute("Money") 
-        or player:GetAttribute("Cash")
-    if attr then return attr end
-    return 0
+    return nil
 end
 
-local function findPackages()
-    local packages = {}
-    for _, obj in pairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") then
-            local name = string.lower(obj.Name)
-            for _, packageName in ipairs(CONFIG.PackageNames) do
-                if string.find(name, string.lower(packageName)) then
-                    local part = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
-                    if part then
-                        table.insert(packages, part)
-                    end
-                    break
-                end
-            end
+local function getCurrentMoney()
+    local ls = player:FindFirstChild("leaderstats")
+    if ls then
+        local m = ls:FindFirstChild("Cash") or ls:FindFirstChild("Money")
+        if m then return m.Value end
+    end
+    return player:GetAttribute("Cash") or player:GetAttribute("Money") or 0
+end
+
+-- Detectar ATMs disponibles
+local function getAvailableATMs()
+    local list = {}
+    local spawners = workspace:FindFirstChild("Game") 
+        and workspace.Game:FindFirstChild("Jobs") 
+        and workspace.Game.Jobs:FindFirstChild("CriminalATMSpawners")
+    
+    if not spawners then return list end
+    
+    for _, spawner in ipairs(spawners:GetChildren()) do
+        local atm = spawner:FindFirstChild("CriminalATM")
+        if atm and atm:GetAttribute("State") == "Normal" then
+            table.insert(list, {spawner = spawner, atm = atm})
         end
     end
-    return packages
+    return list
 end
 
-local function goToPackage(part)
-    if humanoidRootPart and humanoidRootPart.Parent then
-        humanoidRootPart.CFrame = CFrame.new(part.Position + Vector3.new(0, 4, 0))
-    end
-end
-
-local function doDelivery()
-    if not humanoidRootPart or not humanoidRootPart.Parent then return end
-    humanoidRootPart.CFrame = CFrame.new(CONFIG.DeliveryPosition + Vector3.new(0, 3, 0))
-    task.wait(0.5)
-    
-    local prompt = workspace:FindFirstChild(CONFIG.DeliveryPrompt, true)
-    if prompt and prompt:IsA("ProximityPrompt") then
-        prompt:InputHoldBegin()
-        task.wait(0.2)
-        prompt:InputHoldEnd()
-    end
-    
-    local remote = game:GetService("ReplicatedStorage"):FindFirstChild(CONFIG.DeliveryRemote)
-    if remote and remote:IsA("RemoteEvent") then
-        remote:FireServer()
+-- Unirse al trabajo Outlaw
+local function joinOutlaw()
+    if startJob then
+        pcall(function()
+            startJob:FireServer("Criminal", "jobPad")
+        end)
     end
 end
 
-local function doATM(position)
-    if not humanoidRootPart or not humanoidRootPart.Parent then return end
-    humanoidRootPart.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
-    task.wait(0.25)
+-- Robar un ATM
+local function robATM(data)
+    local root = getHRP()
+    if not root then return end
     
-    local prompt = workspace:FindFirstChild(CONFIG.ATMPrompt, true)
-    if prompt and prompt:IsA("ProximityPrompt") then
-        prompt:InputHoldBegin()
-        task.wait(0.15)
-        prompt:InputHoldEnd()
+    -- Teletransporte cerca del ATM
+    root.CFrame = CFrame.new(data.spawner.Position + Vector3.new(0, 4, 0))
+    task.wait(0.35)
+    
+    -- Iniciar el robo
+    if bustStart then
+        pcall(function()
+            if bustStart:IsA("RemoteFunction") then
+                bustStart:InvokeServer(data.atm)
+            else
+                bustStart:FireServer(data.atm)
+            end
+        end)
     end
     
-    local remote = game:GetService("ReplicatedStorage"):FindFirstChild(CONFIG.ATMRemote)
-    if remote and remote:IsA("RemoteEvent") then
-        remote:FireServer()
+    task.wait(0.8)
+    
+    -- Completar
+    if bustEnd then
+        pcall(function()
+            if bustEnd:IsA("RemoteFunction") then
+                bustEnd:InvokeServer(data.atm)
+            else
+                bustEnd:FireServer(data.atm)
+            end
+        end)
     end
 end
 
+-- Aplicar límite
 local function applyLimit()
-    local text = limitBox.Text:gsub("%D", "")
-    local number = tonumber(text)
-    
-    if number and number > 0 then
-        CONFIG.MoneyLimit = number
-        limitBox.Text = tostring(number)
-        infoLabel.Text = "Límite: $" .. CONFIG.MoneyLimit .. "\n\nAl llegar al límite\nentrega y sigue farmeando"
+    local num = tonumber(limitBox.Text:gsub("%D", ""))
+    if num and num > 0 then
+        CONFIG.MoneyLimit = num
+        limitBox.Text = tostring(num)
+        infoLabel.Text = "Límite: $" .. num .. "\n\nAl llegar entrega y sigue"
     else
-        infoLabel.Text = "Error: escribe un\nnúmero válido"
+        infoLabel.Text = "Número inválido"
         limitBox.Text = tostring(CONFIG.MoneyLimit)
     end
 end
 
-local function stopAllFarming()
-    atmFarming = false
-    deliveryFarming = false
-    atmBtn.Text = "ATM AutoFarm: OFF"
-    atmBtn.BackgroundColor3 = CONFIG.SecondaryColor
-    deliveryBtn.Text = "Delivery AutoFarm: OFF"
-    deliveryBtn.BackgroundColor3 = CONFIG.PrimaryColor
-    infoLabel.Text = "Farmeo finalizado\n\nTodo detenido"
+-- Toggle ATM
+local function toggleATM()
+    atmFarming = not atmFarming
+    
+    if atmFarming then
+        atmBtn.Text = "ATM AutoFarm: ON"
+        atmBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
+        joinOutlaw()
+        
+        task.spawn(function()
+            while atmFarming do
+                local money = getCurrentMoney()
+                
+                if money >= CONFIG.MoneyLimit then
+                    infoLabel.Text = "¡Límite alcanzado!\nEntregando..."
+                    -- Aquí podrías teletransportar a la base de Outlaws
+                    -- Por ahora solo avisa
+                    task.wait(2)
+                end
+                
+                local atms = getAvailableATMs()
+                if #atms == 0 then
+                    infoLabel.Text = "Buscando ATMs...\nNinguno disponible"
+                    task.wait(2)
+                else
+                    for _, data in ipairs(atms) do
+                        if not atmFarming then break end
+                        robATM(data)
+                        infoLabel.Text = "Robando ATM...\nDisponibles: " .. #atms
+                        task.wait(CONFIG.ATMWaitTime)
+                    end
+                end
+                task.wait(0.5)
+            end
+        end)
+    else
+        atmBtn.Text = "ATM AutoFarm: OFF"
+        atmBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+    end
 end
 
+-- Toggle Delivery (búsqueda básica)
 local function toggleDelivery()
     deliveryFarming = not deliveryFarming
     
@@ -317,68 +287,53 @@ local function toggleDelivery()
         
         task.spawn(function()
             while deliveryFarming do
-                local packages = findPackages()
-                if #packages == 0 then
-                    infoLabel.Text = "Buscando paquetes...\nNo se encontraron"
-                    task.wait(2)
-                else
-                    for _, pack in ipairs(packages) do
-                        if not deliveryFarming then break end
-                        if pack and pack.Parent then
-                            goToPackage(pack)
-                            infoLabel.Text = "Yendo a paquete...\nEncontrados: " .. #packages
-                            task.wait(CONFIG.DeliveryWaitTime)
+                -- Busca objetos que parezcan puntos de delivery
+                local found = false
+                for _, obj in pairs(workspace:GetDescendants()) do
+                    if not deliveryFarming then break end
+                    local name = string.lower(obj.Name)
+                    if (string.find(name, "package") or string.find(name, "delivery") or string.find(name, "dropoff") or string.find(name, "pickup")) 
+                       and (obj:IsA("BasePart") or obj:IsA("Model")) then
+                        local part = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
+                        if part then
+                            local root = getHRP()
+                            if root then
+                                root.CFrame = CFrame.new(part.Position + Vector3.new(0, 5, 0))
+                                infoLabel.Text = "Yendo a punto Delivery..."
+                                found = true
+                                task.wait(CONFIG.DeliveryWaitTime)
+                            end
                         end
                     end
+                end
+                if not found then
+                    infoLabel.Text = "Buscando puntos Delivery...\nNo se encontraron"
+                    task.wait(2)
                 end
                 task.wait(0.4)
             end
         end)
     else
         deliveryBtn.Text = "Delivery AutoFarm: OFF"
-        deliveryBtn.BackgroundColor3 = CONFIG.PrimaryColor
+        deliveryBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
     end
 end
 
-local function toggleATM()
-    atmFarming = not atmFarming
-    
-    if atmFarming then
-        atmBtn.Text = "ATM AutoFarm: ON"
-        atmBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
-        
-        task.spawn(function()
-            while atmFarming do
-                local currentMoney = getCurrentMoney()
-                
-                if currentMoney >= CONFIG.MoneyLimit then
-                    infoLabel.Text = "¡Límite alcanzado!\nEntregando dinero..."
-                    doDelivery()
-                    task.wait(1.2)
-                    infoLabel.Text = "Dinero entregado\nContinuando farm..."
-                end
-                
-                for _, pos in ipairs(CONFIG.ATMPositions) do
-                    if not atmFarming then break end
-                    doATM(pos)
-                    local money = getCurrentMoney()
-                    infoLabel.Text = "Dinero: $" .. money .. "\nLímite: $" .. CONFIG.MoneyLimit
-                    task.wait(CONFIG.ATMWaitTime)
-                end
-                task.wait(0.3)
-            end
-        end)
-    else
-        atmBtn.Text = "ATM AutoFarm: OFF"
-        atmBtn.BackgroundColor3 = CONFIG.SecondaryColor
-    end
+local function stopAll()
+    atmFarming = false
+    deliveryFarming = false
+    atmBtn.Text = "ATM AutoFarm: OFF"
+    atmBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+    deliveryBtn.Text = "Delivery AutoFarm: OFF"
+    deliveryBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
+    infoLabel.Text = "Farmeo finalizado"
 end
 
 local function toggleMinimize()
     isMinimized = not isMinimized
     if isMinimized then
         content.Visible = false
-        panel.Size = UDim2.new(0, 175, 0, 38)
+        panel.Size = UDim2.new(0, 180, 0, 38)
         minimizeBtn.Text = "+"
     else
         content.Visible = true
@@ -387,19 +342,17 @@ local function toggleMinimize()
     end
 end
 
-deliveryBtn.MouseButton1Click:Connect(toggleDelivery)
+-- Conexiones
 atmBtn.MouseButton1Click:Connect(toggleATM)
+deliveryBtn.MouseButton1Click:Connect(toggleDelivery)
+stopBtn.MouseButton1Click:Connect(stopAll)
 applyBtn.MouseButton1Click:Connect(applyLimit)
-stopBtn.MouseButton1Click:Connect(stopAllFarming)
 minimizeBtn.MouseButton1Click:Connect(toggleMinimize)
+limitBox.FocusLost:Connect(function(enter) if enter then applyLimit() end end)
 
-limitBox.FocusLost:Connect(function(enter)
-    if enter then applyLimit() end
+player.CharacterAdded:Connect(function(char)
+    character = char
+    hrp = char:WaitForChild("HumanoidRootPart")
 end)
 
-player.CharacterAdded:Connect(function(newChar)
-    character = newChar
-    humanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
-end)
-
-print("✅ FarmGui cargado correctamente")
+print("✅ Driving Empire Farm cargado - Detecta ATMs automáticamente")
