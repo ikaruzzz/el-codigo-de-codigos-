@@ -1,4 +1,4 @@
--- Driving Empire Farm - Versión mejorada (todos los ATMs + Delivery por fases)
+-- Driving Empire Farm - Corrección ATM activo + Delivery con señal de caja
 if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
@@ -14,11 +14,10 @@ end
 -- ====================== CONFIG ======================
 local CONFIG = {
     MoneyLimit = 50000,
-    ATMActiveWait = 5.0,       -- Cuando el ATM está activo
-    ATMInactiveWait = 1.5,     -- Cuando no está activo (salta rápido)
+    ATMActiveWait = 5.2,
+    ATMInactiveWait = 1.4,
     BetweenATM = 0.3,
-    DeliveryPickupWait = 2.2,  -- Tiempo en cada paquete
-    DeliveryDropWait = 2.5,    -- Tiempo en el punto de entrega
+    DeliveryWait = 2.4,
 }
 
 -- ====================== REMOTES ======================
@@ -32,20 +31,19 @@ local bustStart = getRemote("AttemptATMBustStart")
 local bustEnd   = getRemote("AttemptATMBustComplete")
 local startJob  = getRemote("RequestStartJobSession")
 
--- ====================== ESCANEO PROFUNDO DE ATMs ======================
+-- ====================== ATMs ======================
 local allATMPositions = {}
 
 local function scanAllATMs()
     allATMPositions = {}
     local found = {}
     
-    -- 1. Método principal
     pcall(function()
         local spawners = workspace.Game.Jobs.CriminalATMSpawners
         for _, spawner in ipairs(spawners:GetChildren()) do
             local part = spawner:IsA("BasePart") and spawner or spawner:FindFirstChildWhichIsA("BasePart")
             if part then
-                local key = tostring(math.floor(part.Position.X)) .. "_" .. tostring(math.floor(part.Position.Z))
+                local key = math.floor(part.Position.X) .. "_" .. math.floor(part.Position.Z)
                 if not found[key] then
                     found[key] = true
                     table.insert(allATMPositions, {
@@ -57,30 +55,7 @@ local function scanAllATMs()
         end
     end)
     
-    -- 2. Búsqueda extra por todo el juego (por si hay más)
-    pcall(function()
-        for _, obj in pairs(workspace:GetDescendants()) do
-            local name = string.lower(obj.Name)
-            if (string.find(name, "criminalatm") or string.find(name, "atmspawner") or name == "atm") 
-               and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Folder")) then
-                
-                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
-                if part then
-                    local key = tostring(math.floor(part.Position.X)) .. "_" .. tostring(math.floor(part.Position.Z))
-                    if not found[key] then
-                        found[key] = true
-                        table.insert(allATMPositions, {
-                            position = part.Position,
-                            spawner = obj
-                        })
-                    end
-                end
-            end
-        end
-    end)
-    
-    print("[Farm] Total ATMs encontrados: " .. #allATMPositions)
-    return #allATMPositions
+    print("[Farm] ATMs: " .. #allATMPositions)
 end
 
 scanAllATMs()
@@ -99,9 +74,8 @@ panel.BorderSizePixel = 0
 panel.Parent = screenGui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
 
-local stroke = Instance.new("UIStroke", panel)
-stroke.Color = Color3.fromRGB(60, 60, 70)
-stroke.Thickness = 1.5
+Instance.new("UIStroke", panel).Color = Color3.fromRGB(60, 60, 70)
+Instance.new("UIStroke", panel).Thickness = 1.5
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -40, 0, 28)
@@ -203,10 +177,7 @@ local originalSize = panel.Size
 
 local function getHRP()
     local char = player.Character
-    if char and char:FindFirstChild("HumanoidRootPart") then
-        return char.HumanoidRootPart
-    end
-    return nil
+    return char and char:FindFirstChild("HumanoidRootPart")
 end
 
 local function getCurrentMoney()
@@ -229,17 +200,31 @@ local function joinDeliveryJob()
     if startJob then
         pcall(function() startJob:FireServer("Delivery", "jobPad") end)
         pcall(function() startJob:FireServer("DeliveryDriver", "jobPad") end)
-        pcall(function() startJob:FireServer("Delivery", "DeliveryHub") end)
         task.wait(0.8)
     end
 end
 
-local function isATMActive(spawner)
+-- DETECCIÓN MEJORADA DE ATM ACTIVO
+local function getATMStatus(spawner)
     if not spawner then return false, nil end
+    
     local atm = spawner:FindFirstChild("CriminalATM")
-    if atm and atm:GetAttribute("State") == "Normal" then
+    if not atm then 
+        -- A veces el ATM está directamente en el spawner
+        atm = spawner
+    end
+    
+    -- Varias formas de saber si está activo
+    local state = atm:GetAttribute("State")
+    if state == "Normal" or state == "Available" or state == "Ready" then
         return true, atm
     end
+    
+    -- Si no tiene State, asumimos que puede estar activo e intentamos robar
+    if state == nil then
+        return true, atm
+    end
+    
     return false, atm
 end
 
@@ -248,13 +233,14 @@ local function robATM(data)
     if not root then return end
     
     root.CFrame = CFrame.new(data.position + Vector3.new(0, 5, 0))
-    task.wait(0.28)
+    task.wait(0.3)
     
-    local active, atmModel = isATMActive(data.spawner)
+    local active, atmModel = getATMStatus(data.spawner)
     
-    if active and atmModel then
+    if active then
         infoLabel.Text = "ATM ACTIVO\nRobando..."
-        if bustStart then
+        
+        if bustStart and atmModel then
             pcall(function()
                 if bustStart:IsA("RemoteFunction") then
                     bustStart:InvokeServer(atmModel)
@@ -263,8 +249,10 @@ local function robATM(data)
                 end
             end)
         end
+        
         task.wait(CONFIG.ATMActiveWait)
-        if bustEnd then
+        
+        if bustEnd and atmModel then
             pcall(function()
                 if bustEnd:IsA("RemoteFunction") then
                     bustEnd:InvokeServer(atmModel)
@@ -285,8 +273,6 @@ local function applyLimit()
         CONFIG.MoneyLimit = num
         limitBox.Text = tostring(num)
         infoLabel.Text = "Límite: $" .. num
-    else
-        limitBox.Text = tostring(CONFIG.MoneyLimit)
     end
 end
 
@@ -299,14 +285,9 @@ local function toggleATM()
         atmBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
         joinOutlaw()
         
-        if #allATMPositions < 8 then
-            scanAllATMs()
-        end
-        
         task.spawn(function()
             while atmFarming do
                 if #allATMPositions == 0 then
-                    infoLabel.Text = "Reescaneando ATMs..."
                     scanAllATMs()
                     task.wait(2)
                 else
@@ -327,24 +308,42 @@ local function toggleATM()
     end
 end
 
--- ====================== DELIVERY (POR FASES) ======================
-local function findPoints(keywords)
-    local points = {}
+-- ====================== DELIVERY (SEÑAL DE CAJA) ======================
+local function findBoxMarkers()
+    local markers = {}
+    
     for _, obj in pairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") then
-            local name = string.lower(obj.Name)
-            for _, key in ipairs(keywords) do
-                if string.find(name, key) then
-                    local part = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
-                    if part then
-                        table.insert(points, part)
-                    end
-                    break
-                end
+        local name = string.lower(obj.Name)
+        
+        -- Busca la señal/caja que aparece cuando eres Delivery
+        if (string.find(name, "box") 
+         or string.find(name, "package") 
+         or string.find(name, "parcel") 
+         or string.find(name, "crate")
+         or string.find(name, "marker")
+         or string.find(name, "pickup")
+         or string.find(name, "delivery")
+         or string.find(name, "arrow")
+         or string.find(name, "waypoint")
+         or string.find(name, "objective")) 
+         and (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("MeshPart") or obj:IsA("BillboardGui") or obj:IsA("Attachment")) then
+            
+            local part = nil
+            if obj:IsA("BasePart") or obj:IsA("MeshPart") then
+                part = obj
+            elseif obj:IsA("Model") then
+                part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+            elseif obj:IsA("Attachment") then
+                part = obj.Parent
+            end
+            
+            if part and part:IsA("BasePart") then
+                table.insert(markers, part)
             end
         end
     end
-    return points
+    
+    return markers
 end
 
 local function toggleDelivery()
@@ -355,49 +354,39 @@ local function toggleDelivery()
         deliveryBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
         
         joinDeliveryJob()
-        infoLabel.Text = "Trabajo Delivery\naceptado"
+        infoLabel.Text = "Trabajo aceptado\nBuscando señal de caja..."
         
         task.spawn(function()
             while deliveryFarming do
-                -- FASE 1: Recoger TODOS los paquetes
-                local pickups = findPoints({"package", "parcel", "pickup", "box", "crate"})
+                local markers = findBoxMarkers()
                 
-                if #pickups > 0 then
-                    infoLabel.Text = "Recogiendo paquetes\n(" .. #pickups .. " encontrados)"
-                    for i, part in ipairs(pickups) do
+                if #markers == 0 then
+                    infoLabel.Text = "No se encontró\nla señal de caja"
+                    task.wait(2)
+                else
+                    -- Ir a todas las señales de caja (recogida)
+                    for i, part in ipairs(markers) do
                         if not deliveryFarming then break end
                         local root = getHRP()
                         if root and part and part.Parent then
                             root.CFrame = CFrame.new(part.Position + Vector3.new(0, 6, 0))
-                            infoLabel.Text = "Recogiendo " .. i .. "/" .. #pickups
-                            task.wait(CONFIG.DeliveryPickupWait)
+                            infoLabel.Text = "Caja/Recogida " .. i .. "/" .. #markers
+                            task.wait(CONFIG.DeliveryWait)
                         end
                     end
-                else
-                    infoLabel.Text = "Buscando paquetes..."
-                    task.wait(1.8)
-                end
-                
-                if not deliveryFarming then break end
-                
-                -- FASE 2: Ir a entregar
-                task.wait(0.6)
-                local dropoffs = findPoints({"delivery", "dropoff", "drop", "deliver", "finish", "end"})
-                
-                if #dropoffs > 0 then
-                    infoLabel.Text = "Yendo a entregar\n(" .. #dropoffs .. " puntos)"
-                    for i, part in ipairs(dropoffs) do
+                    
+                    -- Después de recoger, vuelve a buscar (puede cambiar a punto de entrega)
+                    task.wait(1)
+                    local deliverMarkers = findBoxMarkers()
+                    for i, part in ipairs(deliverMarkers) do
                         if not deliveryFarming then break end
                         local root = getHRP()
                         if root and part and part.Parent then
                             root.CFrame = CFrame.new(part.Position + Vector3.new(0, 6, 0))
-                            infoLabel.Text = "Entregando " .. i .. "/" .. #dropoffs
-                            task.wait(CONFIG.DeliveryDropWait)
+                            infoLabel.Text = "Entrega " .. i .. "/" .. #deliverMarkers
+                            task.wait(CONFIG.DeliveryWait)
                         end
                     end
-                else
-                    infoLabel.Text = "Buscando punto\nde entrega..."
-                    task.wait(1.5)
                 end
                 
                 task.wait(1)
