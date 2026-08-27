@@ -1,7 +1,8 @@
 --[[
-    Driving Empire - Delivery (caja → pin → caja...)
-    Tras entregar SOLO busca la caja de nuevo
-    Ignora marcadores de policía / otros trabajos
+    Driving Empire - Delivery (caja + pin)
+    - Acepta el trabajo UNA sola vez
+    - SOLO se teletransporta a: caja (recogida) o pin (entrega)
+    - No va a policía ni a otros marcadores
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -28,10 +29,10 @@ local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 
 local running = false
 local jobAcceptedOnce = false
-local phase = "PICKUP"
+local phase = "PICKUP" -- PICKUP | DELIVERY
 local lastPos = nil
 
--- GUI
+-- ====================== GUI ======================
 local gui = Instance.new("ScreenGui")
 gui.Name = "DeliveryOnlySymbols"
 gui.ResetOnSpawn = false
@@ -92,6 +93,7 @@ local function setStatus(t)
     print("[DELIVERY] " .. t)
 end
 
+-- ====================== UTILS ======================
 local function getHRP()
     local c = player.Character
     return c and c:FindFirstChild("HumanoidRootPart")
@@ -101,7 +103,9 @@ local function tpTo(pos)
     local root = getHRP()
     if root and pos then
         root.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
+        return true
     end
+    return false
 end
 
 local function acceptJobOnce()
@@ -112,7 +116,7 @@ local function acceptJobOnce()
         task.wait(1)
     end
     jobAcceptedOnce = true
-    setStatus("Trabajo aceptado (1 vez)")
+    setStatus("Trabajo aceptado (solo 1 vez)")
 end
 
 local function billboardPosition(bb)
@@ -147,11 +151,11 @@ local function isIconBillboard(bb)
     return false
 end
 
--- Palabras que NO queremos (policía y otros trabajos)
+-- Bloquear policía y otros trabajos
 local BLOCK = {
     "police", "cop", "security", "officer", "sheriff",
-    "criminal", "outlaw", "jobpad", "job_pad", "job pad",
-    "arrest", "bail", "wanted", "team", "citizen"
+    "criminal", "outlaw", "jobpad", "job_pad",
+    "arrest", "bail", "wanted", "citizen"
 }
 
 local function isBlocked(blob)
@@ -161,6 +165,7 @@ local function isBlocked(blob)
     return false
 end
 
+-- SOLO devuelve PICKUP, DELIVERY o nil (nada de UNKNOWN)
 local function classifySymbol(bb)
     local texts = { string.lower(bb.Name) }
     if bb.Parent then table.insert(texts, string.lower(bb.Parent.Name)) end
@@ -173,14 +178,13 @@ local function classifySymbol(bb)
     local blob = table.concat(texts, " ")
 
     if isBlocked(blob) then
-        return "BLOCKED"
+        return nil
     end
 
     local isBox =
         string.find(blob, "box") or string.find(blob, "package") or
         string.find(blob, "parcel") or string.find(blob, "crate") or
-        string.find(blob, "pickup") or string.find(blob, "cargo") or
-        string.find(blob, "shipment")
+        string.find(blob, "pickup") or string.find(blob, "cargo")
 
     local isPin =
         string.find(blob, "pin") or string.find(blob, "marker") or
@@ -189,12 +193,15 @@ local function classifySymbol(bb)
         string.find(blob, "deliver") or string.find(blob, "destination") or
         string.find(blob, "goal") or string.find(blob, "objective")
 
+    -- Si tiene ambos, priorizar por fase no aplica aquí; preferir box si es box
+    if isBox and not isPin then return "PICKUP" end
+    if isPin and not isBox then return "DELIVERY" end
     if isBox then return "PICKUP" end
     if isPin then return "DELIVERY" end
-    return "UNKNOWN"
+    return nil -- desconocido = NO usar (evita teleports random)
 end
 
--- wantedPhase = "PICKUP" o "DELIVERY" (estricto, sin UNKNOWN)
+-- Solo símbolos del tipo pedido (caja O pin)
 local function findSymbols(wantedPhase)
     local root = getHRP()
     if not root then return {} end
@@ -209,7 +216,7 @@ local function findSymbols(wantedPhase)
 
         if obj:IsA("BillboardGui") and isIconBillboard(obj) then
             local kind = classifySymbol(obj)
-            -- SOLO el tipo pedido (nunca UNKNOWN ni BLOCKED)
+            -- ESTRICTO: solo el tipo de la fase actual
             if kind == wantedPhase then
                 local pos = billboardPosition(obj)
                 if pos then
@@ -237,19 +244,22 @@ local function findSymbols(wantedPhase)
     return list
 end
 
+-- ====================== LOOP ======================
 local function farmLoop()
     acceptJobOnce()
     phase = "PICKUP"
-    setStatus("Fase: CAJA")
+    setStatus("Fase: RECOGIDA (caja)")
 
     while running do
         if phase == "PICKUP" then
             local list = findSymbols("PICKUP")
-            setStatus("Buscando caja...\n(" .. #list .. ")")
+            setStatus("Cajas: " .. #list)
 
             if #list == 0 then
+                setStatus("Esperando icono de caja...")
                 task.wait(1.5)
             else
+                -- SOLO el punto de recogida más cercano
                 local data = list[1]
                 lastPos = data.position
                 setStatus("RECOGIDA\n" .. data.name)
@@ -258,27 +268,29 @@ local function farmLoop()
 
                 phase = "DELIVERY"
                 lastPos = nil
-                setStatus("Fase: PIN")
+                setStatus("Fase: ENTREGA (pin)")
                 task.wait(0.8)
             end
 
         else -- DELIVERY
             local list = findSymbols("DELIVERY")
-            setStatus("Buscando pin...\n(" .. #list .. ")")
+            setStatus("Pines: " .. #list)
 
             if #list == 0 then
+                setStatus("Esperando icono de entrega...")
                 task.wait(1.5)
             else
+                -- SOLO el punto de entrega más cercano
                 local data = list[1]
                 lastPos = data.position
                 setStatus("ENTREGA\n" .. data.name)
                 tpTo(data.position)
                 task.wait(CONFIG.WaitDelivery)
 
-                -- Volver SOLO a buscar caja (NO policía, NO aceptar job)
+                -- Volver SOLO a la caja (nada más)
                 phase = "PICKUP"
                 lastPos = nil
-                setStatus("Fase: CAJA de nuevo")
+                setStatus("Fase: RECOGIDA (caja)")
                 task.wait(1)
             end
         end
@@ -307,4 +319,4 @@ stopBtn.MouseButton1Click:Connect(function()
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] Tras entrega → solo caja | Bloquea policía")
+print("[DELIVERY] Solo caja y pin | Sin otros teleports")
