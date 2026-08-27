@@ -1,8 +1,9 @@
 --[[
     Driving Empire - Auto Delivery
-    Recogida: TP → salir/entrar círculo x2 → recoger
-    Entrega:  TP → salir/entrar círculo x2 → entregar
-    Entre puntos: solo teletransporte
+    1) Confirmar dentro del círculo
+    2) 2x salir (más allá del borde) + entrar
+    3) Interactuar
+    4) TP al otro punto y repetir
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -19,13 +20,18 @@ if player.PlayerGui:FindFirstChild("DeliveryOnlySymbols") then
 end
 
 local CONFIG = {
-    InteractRadius = 18,
-    WalkOutDistance = 20,
-    WalkTimeout = 3.5,
-    CircleExits = 2,        -- salir del círculo exactamente 2 veces
+    -- Radio del círculo de interacción (aprox. según el juego)
+    CircleRadius = 14,
+    -- Margen: "claramente dentro"
+    InsideMargin = 3,
+    -- Salida: un poco más allá del borde (no demasiado lejos)
+    WalkOutExtra = 6,
+    WalkTimeout = 4,
+    CircleExits = 2,
     ConfirmDelay = 0.4,
     MaxDistance = 5000,
     MaxTries = 6,
+    InteractScan = 22,
 }
 
 local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -38,7 +44,6 @@ local phase = "PICKUP"
 local cache = {
     pickup = nil,
     delivery = nil,
-    lastFullScan = 0,
 }
 
 -- ====================== GUI ======================
@@ -134,11 +139,56 @@ local function walkTo(pos, timeout)
             hum:MoveTo(root.Position)
             return false
         end
-        if (root.Position - pos).Magnitude <= 4 then return true end
+        if (root.Position - pos).Magnitude <= 3.5 then return true end
         if tick() - t0 > 1 then hum:MoveTo(pos) end
         task.wait(0.12)
     end
     return (root.Position - pos).Magnitude <= 6
+end
+
+-- Distancia horizontal al centro del círculo
+local function horizDist(a, b)
+    local dx = a.X - b.X
+    local dz = a.Z - b.Z
+    return math.sqrt(dx * dx + dz * dz)
+end
+
+local function isInsideCircle(centerPos)
+    local root = getHRP()
+    if not root or not centerPos then return false end
+    -- Claramente dentro: radio - margen
+    return horizDist(root.Position, centerPos) <= (CONFIG.CircleRadius - CONFIG.InsideMargin)
+end
+
+local function isOutsideCircle(centerPos)
+    local root = getHRP()
+    if not root or not centerPos then return true end
+    return horizDist(root.Position, centerPos) > (CONFIG.CircleRadius + 1)
+end
+
+-- Obligatorio: estar dentro ANTES de cualquier salida
+local function ensureInsideCircle(centerPos, label)
+    local root = getHRP()
+    if not root then return false end
+
+    if isInsideCircle(centerPos) then
+        print("[DELIVERY] Ya dentro del círculo")
+        return true
+    end
+
+    setStatus(label .. "\nEntrando al círculo...")
+    print("[DELIVERY] Fuera → caminar al centro")
+    -- Centro del círculo (claramente dentro)
+    local ok = walkTo(centerPos, CONFIG.WalkTimeout)
+    task.wait(0.15)
+
+    if isInsideCircle(centerPos) then
+        return true
+    end
+    -- Segundo intento más al centro
+    walkTo(centerPos, CONFIG.WalkTimeout)
+    task.wait(0.1)
+    return isInsideCircle(centerPos) or horizDist(getHRP().Position, centerPos) < CONFIG.CircleRadius
 end
 
 local function acceptJobOnce()
@@ -250,10 +300,8 @@ local function fullScan()
             end
         end
     end
-
     cache.pickup = bestP
     cache.delivery = bestD
-    cache.lastFullScan = tick()
 end
 
 local function getTarget(kind)
@@ -304,12 +352,12 @@ local function interactNearby(centerPos)
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("ProximityPrompt") and obj.Enabled then
             local pos = getPromptWorldPos(obj)
-            if pos and (pos - centerPos).Magnitude <= CONFIG.InteractRadius then
+            if pos and (pos - centerPos).Magnitude <= CONFIG.InteractScan then
                 if firePrompt(obj) then fired = fired + 1 end
             end
         elseif obj:IsA("ClickDetector") then
             local part = obj.Parent
-            if part and part:IsA("BasePart") and (part.Position - centerPos).Magnitude <= CONFIG.InteractRadius then
+            if part and part:IsA("BasePart") and (part.Position - centerPos).Magnitude <= CONFIG.InteractScan then
                 if fireclickdetector then
                     pcall(function() fireclickdetector(obj) end)
                     fired = fired + 1
@@ -325,27 +373,43 @@ local function interactNearby(centerPos)
     return fired
 end
 
--- Salir del círculo y volver a entrar (1 vez)
-local function walkOutAndIn(centerPos, label)
-    local outPos = centerPos + Vector3.new(CONFIG.WalkOutDistance, 0, 0)
-    setStatus(label .. "\nSalir del círculo...")
+-- 1 ciclo: SOLO si ya está dentro → salir más allá del borde → volver dentro
+local function oneExitEnterCycle(centerPos, label, index)
+    -- NUNCA salir sin estar dentro
+    if not ensureInsideCircle(centerPos, label) then
+        print("[DELIVERY][ERROR] No se pudo entrar al círculo")
+        return false
+    end
+
+    -- Punto fuera: radio + extra (claramente fuera, sin irse lejos)
+    local outDist = CONFIG.CircleRadius + CONFIG.WalkOutExtra
+    local outPos = centerPos + Vector3.new(outDist, 0, 0)
+
+    setStatus(label .. "\nSalida " .. index .. "/2")
+    print("[DELIVERY] " .. label .. " salir #" .. index)
     walkTo(outPos, CONFIG.WalkTimeout)
     task.wait(0.2)
-    setStatus(label .. "\nEntrar al círculo...")
+
+    setStatus(label .. "\nEntrada " .. index .. "/2")
+    print("[DELIVERY] " .. label .. " entrar #" .. index)
     walkTo(centerPos, CONFIG.WalkTimeout)
     task.wait(0.15)
+
+    -- Confirmar de nuevo dentro
+    ensureInsideCircle(centerPos, label)
     interactNearby(centerPos)
+    return true
 end
 
--- Exactamente 2 salidas/entradas + interacción
-local function doTwoCircleExits(centerPos, label)
+local function doTwoExitEnterCycles(centerPos, label)
     for i = 1, CONFIG.CircleExits do
-        if not running then return end
-        setStatus(label .. "\nSalida " .. i .. "/" .. CONFIG.CircleExits)
-        print("[DELIVERY] " .. label .. " salida " .. i)
-        walkOutAndIn(centerPos, label)
+        if not running then return false end
+        if not oneExitEnterCycle(centerPos, label, i) then
+            return false
+        end
         task.wait(CONFIG.ConfirmDelay)
     end
+    return true
 end
 
 -- ====================== RECOGIDA ======================
@@ -354,15 +418,17 @@ local function doPickup(target)
     setStatus("TP recogida\n" .. target.name)
     print("[DELIVERY] TP → pickup")
 
-    -- Teletransporte al punto de recogida
     tpTo(pos)
     task.wait(0.2)
+
+    -- Verificar dentro ANTES de las salidas
+    if not ensureInsideCircle(pos, "Recogida") then
+        return false, nil
+    end
+
+    doTwoExitEnterCycles(pos, "Recogida")
     interactNearby(pos)
 
-    -- Salir del círculo 2 veces (volviendo a entrar cada vez)
-    doTwoCircleExits(pos, "Recogida")
-
-    -- Comprobar si ya hay entrega (recogida hecha)
     for _ = 1, CONFIG.MaxTries do
         if not running then return false, nil end
         invalidate("DELIVERY")
@@ -372,7 +438,6 @@ local function doPickup(target)
             invalidate("PICKUP")
             return true, del
         end
-        -- una pasada extra de interacción en el centro
         interactNearby(pos)
         task.wait(CONFIG.ConfirmDelay)
     end
@@ -390,15 +455,17 @@ end
 local function doDelivery(target)
     local pos = target.position
     setStatus("TP entrega\n" .. target.name)
-    print("[DELIVERY] TP → delivery (sin caminar el trayecto)")
+    print("[DELIVERY] TP → delivery")
 
-    -- Teletransporte DIRECTO (nunca caminar desde recogida)
     tpTo(pos)
     task.wait(0.2)
-    interactNearby(pos)
 
-    -- Mismo patrón: salir del círculo 2 veces
-    doTwoCircleExits(pos, "Entrega")
+    if not ensureInsideCircle(pos, "Entrega") then
+        return false
+    end
+
+    doTwoExitEnterCycles(pos, "Entrega")
+    interactNearby(pos)
 
     for _ = 1, CONFIG.MaxTries do
         if not running then return false end
@@ -409,9 +476,7 @@ local function doDelivery(target)
         end
         interactNearby(pos)
         task.wait(CONFIG.ConfirmDelay)
-        if cache.delivery then
-            pos = cache.delivery.position
-        end
+        if cache.delivery then pos = cache.delivery.position end
     end
 
     if not cacheEntryValid(cache.delivery) then
@@ -442,7 +507,6 @@ local function farmLoop()
                         deliveryTarget = getTarget("DELIVERY")
                     end
                     if deliveryTarget then
-                        -- TP directo a entrega
                         if doDelivery(deliveryTarget) then
                             phase = "PICKUP"
                             setStatus("Siguiente pedido...")
@@ -451,7 +515,6 @@ local function farmLoop()
                             phase = "PICKUP"
                         end
                     else
-                        setStatus("Buscando pin...")
                         fullScan()
                         phase = "DELIVERY"
                     end
@@ -508,4 +571,4 @@ stopBtn.MouseButton1Click:Connect(function()
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] TP → 2 salidas círculo (pickup y delivery)")
+print("[DELIVERY] ensureInside → 2x exit/enter → interact")
