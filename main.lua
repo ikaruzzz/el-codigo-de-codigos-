@@ -19,8 +19,8 @@ end
 local CONFIG = {
     CircleRadius = 14,       -- radio del área de interacción
     InsideNeed = 11,         -- <= esto = dentro (margen)
-    OutsideNeed = 16,        -- >= esto = fuera del círculo
-    WalkOutDist = 20,        -- destino de salida (un poco más allá del borde)
+    OutsideNeed = 22,        -- >= esto = fuera del círculo
+    WalkOutDist = 28,        -- destino de salida (un poco más allá del borde)
     WalkTimeout = 5,
     CircleExits = 2,
     MaxRetries = 4,
