@@ -1,8 +1,7 @@
 --[[
-    Driving Empire - Delivery (caja + pin + interacción)
-    Base: tu script que funciona
-    + Interactuar (ProximityPrompt / ClickDetector / zona)
-    + Confirmar recogida y entrega de verdad
+    Driving Empire - Delivery
+    + Reintento: caminar fuera/dentro del círculo (MoveTo, no CFrame)
+    + Búsqueda rápida: caché de objetivos
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -19,14 +18,17 @@ if player.PlayerGui:FindFirstChild("DeliveryOnlySymbols") then
 end
 
 local CONFIG = {
-    WaitPickup = 1.2,
-    WaitDelivery = 1.2,
-    InteractRadius = 25,
-    ConfirmDelay = 0.6,
-    MaxPackageTries = 12,
-    MaxDeliveryTries = 10,
-    Between = 0.8,
+    WaitAtTarget = 0.8,
+    InteractRadius = 18,
+    WalkOutDistance = 22,   -- pasos fuera del radio
+    WalkTimeout = 4,
+    MaxWalkRetries = 4,
+    ConfirmDelay = 0.5,
+    MaxPackageTries = 10,
+    MaxDeliveryTries = 8,
+    Between = 0.5,
     MaxDistance = 5000,
+    CacheRefresh = 3.0,     -- solo reescanea completo cada X s si hace falta
 }
 
 local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -35,9 +37,14 @@ local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 local running = false
 local jobAcceptedOnce = false
 local phase = "PICKUP"
-local lastPos = nil
-local lockedDeliveryPos = nil
 local packagesCollected = 0
+
+-- Caché de objetivos
+local cache = {
+    pickup = nil,       -- { position, name, bb }
+    delivery = nil,
+    lastFullScan = 0,
+}
 
 -- ====================== GUI ======================
 local gui = Instance.new("ScreenGui")
@@ -106,6 +113,11 @@ local function getHRP()
     return c and c:FindFirstChild("HumanoidRootPart")
 end
 
+local function getHum()
+    local c = player.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
 local function tpTo(pos)
     local root = getHRP()
     if root and pos then
@@ -115,12 +127,39 @@ local function tpTo(pos)
     return false
 end
 
+-- Movimiento NORMAL (no CFrame)
+local function walkTo(pos, timeout)
+    local hum = getHum()
+    local root = getHRP()
+    if not hum or not root or not pos then return false end
+
+    hum:MoveTo(pos)
+    local t0 = tick()
+    timeout = timeout or CONFIG.WalkTimeout
+
+    while tick() - t0 < timeout do
+        if not running then
+            hum:MoveTo(root.Position)
+            return false
+        end
+        if (root.Position - pos).Magnitude <= 4 then
+            return true
+        end
+        -- re-emitir MoveTo por si se interrumpe
+        if tick() - t0 > 1.2 then
+            hum:MoveTo(pos)
+        end
+        task.wait(0.15)
+    end
+    return (root.Position - pos).Magnitude <= 6
+end
+
 local function acceptJobOnce()
     if jobAcceptedOnce then return end
     if startJob then
         pcall(function() startJob:FireServer("Delivery", "jobPad") end)
         pcall(function() startJob:FireServer("DeliveryDriver", "jobPad") end)
-        task.wait(1)
+        task.wait(0.8)
     end
     jobAcceptedOnce = true
     setStatus("Trabajo aceptado (1 vez)")
@@ -190,39 +229,91 @@ local function classifySymbol(bb)
     return nil
 end
 
-local function findSymbols(wantedPhase)
+-- Validar que la entrada de caché sigue viva
+local function cacheEntryValid(entry)
+    if not entry or not entry.bb then return false end
+    if not entry.bb.Parent then return false end
+    if not entry.bb:IsA("BillboardGui") or not entry.bb.Enabled then return false end
+    local pos = billboardPosition(entry.bb)
+    if not pos then return false end
+    entry.position = pos -- actualizar posición actual
+    return true
+end
+
+-- Un solo escaneo completo (caro) → llena caché
+local function fullScan()
     local root = getHRP()
-    if not root then return {} end
+    if not root then return end
     local rootPos = root.Position
-    local list = {}
-    local seen = {}
+    local bestPickup, bestDelivery = nil, nil
+    local bestPD, bestDD = math.huge, math.huge
     local n = 0
 
     for _, obj in ipairs(workspace:GetDescendants()) do
         n = n + 1
-        if n % 700 == 0 then task.wait() end
+        if n % 900 == 0 then task.wait() end
+
         if obj:IsA("BillboardGui") and isIconBillboard(obj) then
-            if classifySymbol(obj) == wantedPhase then
+            local kind = classifySymbol(obj)
+            if kind then
                 local pos = billboardPosition(obj)
                 if pos then
                     local dist = (pos - rootPos).Magnitude
                     if dist <= CONFIG.MaxDistance then
-                        local key = string.format("%.0f_%.0f_%.0f", pos.X, pos.Y, pos.Z)
-                        if not seen[key] then
-                            seen[key] = true
-                            table.insert(list, {
-                                position = pos,
-                                distance = dist,
-                                name = obj.Name
-                            })
+                        if kind == "PICKUP" and dist < bestPD then
+                            bestPD = dist
+                            bestPickup = { bb = obj, position = pos, name = obj.Name, distance = dist }
+                        elseif kind == "DELIVERY" and dist < bestDD then
+                            bestDD = dist
+                            bestDelivery = { bb = obj, position = pos, name = obj.Name, distance = dist }
                         end
                     end
                 end
             end
         end
     end
-    table.sort(list, function(a, b) return a.distance < b.distance end)
-    return list
+
+    cache.pickup = bestPickup
+    cache.delivery = bestDelivery
+    cache.lastFullScan = tick()
+    print("[DELIVERY] Full scan | caja=" .. (bestPickup and bestPickup.name or "nil") .. " | pin=" .. (bestDelivery and bestDelivery.name or "nil"))
+end
+
+-- Obtener objetivo: usa caché si es válida; si no, reescanea
+local function getTarget(kind)
+    local entry = (kind == "PICKUP") and cache.pickup or cache.delivery
+
+    if cacheEntryValid(entry) then
+        return entry
+    end
+
+    -- invalidar
+    if kind == "PICKUP" then cache.pickup = nil else cache.delivery = nil end
+
+    -- reescaneo solo si pasó el intervalo o no hay nada
+    local need = (tick() - cache.lastFullScan) >= CONFIG.CacheRefresh
+        or (cache.pickup == nil and cache.delivery == nil)
+        or (kind == "PICKUP" and cache.pickup == nil)
+        or (kind == "DELIVERY" and cache.delivery == nil)
+
+    if need then
+        fullScan()
+    end
+
+    entry = (kind == "PICKUP") and cache.pickup or cache.delivery
+    if cacheEntryValid(entry) then
+        return entry
+    end
+    return nil
+end
+
+local function invalidate(kind)
+    if kind == "PICKUP" then cache.pickup = nil
+    elseif kind == "DELIVERY" then cache.delivery = nil
+    else
+        cache.pickup = nil
+        cache.delivery = nil
+    end
 end
 
 -- ====================== INTERACCIÓN ======================
@@ -239,10 +330,7 @@ local function getPromptWorldPos(prompt)
 end
 
 local function firePrompt(prompt)
-    if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Enabled then
-        return false
-    end
-    -- Métodos comunes en executors
+    if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Enabled then return false end
     if fireproximityprompt then
         pcall(function() fireproximityprompt(prompt) end)
         return true
@@ -261,64 +349,78 @@ local function fireClick(cd)
         pcall(function() fireclickdetector(cd) end)
         return true
     end
-    pcall(function()
-        -- fallback débil
-        cd.MouseClick:Fire(player)
-    end)
-    return true
+    return false
 end
 
--- Busca y activa interacciones cerca del jugador
 local function interactNearby(centerPos)
-    local root = getHRP()
-    if not root then return 0 end
-    centerPos = centerPos or root.Position
     local fired = 0
-
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("ProximityPrompt") and obj.Enabled then
             local pos = getPromptWorldPos(obj)
             if pos and (pos - centerPos).Magnitude <= CONFIG.InteractRadius then
-                local action = string.lower(obj.ActionText or "")
-                local object = string.lower(obj.ObjectText or "")
-                local name = string.lower(obj.Name)
-                -- priorizar textos de delivery/paquete
-                local relevant =
-                    string.find(action, "pick") or string.find(action, "collect") or
-                    string.find(action, "deliver") or string.find(action, "drop") or
-                    string.find(object, "package") or string.find(object, "box") or
-                    string.find(name, "package") or string.find(name, "deliver") or
-                    true -- si está en radio, intentar igual
-
-                if relevant then
-                    if firePrompt(obj) then
-                        fired = fired + 1
-                        print("[DELIVERY] ProximityPrompt: " .. obj.Name .. " / " .. (obj.ActionText or ""))
-                    end
+                if firePrompt(obj) then
+                    fired = fired + 1
                 end
             end
         elseif obj:IsA("ClickDetector") then
             local part = obj.Parent
             if part and part:IsA("BasePart") and (part.Position - centerPos).Magnitude <= CONFIG.InteractRadius then
-                if fireClick(obj) then
-                    fired = fired + 1
-                    print("[DELIVERY] ClickDetector: " .. obj:GetFullName())
-                end
+                if fireClick(obj) then fired = fired + 1 end
             end
         end
     end
-
-    -- Tecla E por si el prompt depende de input
     pcall(function()
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-        task.wait(0.05)
+        task.wait(0.04)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
     end)
-
     return fired
 end
 
--- Contar cajas físicas cerca (señal de paquetes aún en el suelo)
+-- Reintento: caminar FUERA → esperar → caminar al CENTRO (sin TP)
+local function walkOutAndBack(centerPos)
+    local root = getHRP()
+    if not root then return false end
+
+    local offset = Vector3.new(CONFIG.WalkOutDistance, 0, 0)
+    local outPos = centerPos + offset
+
+    setStatus("Caminando fuera del radio...")
+    print("[DELIVERY] Walk OUT")
+    walkTo(outPos, CONFIG.WalkTimeout)
+    task.wait(0.35)
+
+    setStatus("Caminando al centro...")
+    print("[DELIVERY] Walk IN")
+    local ok = walkTo(centerPos, CONFIG.WalkTimeout)
+    task.wait(0.2)
+    return ok
+end
+
+local function tryInteractWithWalkRetry(centerPos)
+    -- ya debería estar cerca (vino por TP inicial una vez)
+    local fired = interactNearby(centerPos)
+    if fired > 0 then
+        return true, fired
+    end
+
+    for attempt = 1, CONFIG.MaxWalkRetries do
+        if not running then return false, 0 end
+        setStatus("Reintento walk " .. attempt .. "/" .. CONFIG.MaxWalkRetries)
+        print("[DELIVERY] Interacción no activa → walk retry " .. attempt)
+
+        walkOutAndBack(centerPos)
+        fired = interactNearby(centerPos)
+        if fired > 0 then
+            print("[DELIVERY] Interacción activada tras walk")
+            return true, fired
+        end
+        task.wait(0.25)
+    end
+
+    return false, 0
+end
+
 local function countGroundPackages(center, radius)
     radius = radius or 20
     local n = 0
@@ -337,101 +439,85 @@ local function countGroundPackages(center, radius)
     return n
 end
 
-local function pinStillNear(pos)
-    if not pos then return #findSymbols("DELIVERY") > 0 end
-    for _, p in ipairs(findSymbols("DELIVERY")) do
-        if (p.position - pos).Magnitude < 30 then return true end
-    end
-    return false
-end
+-- ====================== PICKUP / DELIVERY ======================
+local function doPickup(target)
+    local pos = target.position
+    setStatus("Pickup: " .. target.name)
+    print("[DELIVERY] Pickup validado: " .. target.name)
 
--- ====================== FASES CON INTERACCIÓN ======================
-local function doPickupAt(pos)
-    setStatus("Recogiendo paquetes...")
-    print("[DELIVERY] Llegada a pickup - interactuando")
+    -- Solo el primer acercamiento puede ser TP; reintentos = caminar
     tpTo(pos)
-    task.wait(0.3)
+    task.wait(CONFIG.WaitAtTarget)
 
     local before = countGroundPackages(pos, 22)
-    packagesCollected = 0
 
     for i = 1, CONFIG.MaxPackageTries do
         if not running then return false end
-        tpTo(pos)
-        local fired = interactNearby(pos)
-        setStatus("Pickup try " .. i .. " | prompts=" .. fired)
 
-        -- pequeño movimiento para TouchInterest de zona
-        local root = getHRP()
-        if root then
-            root.CFrame = root.CFrame * CFrame.new(1.5, 0, 0)
-            task.wait(0.15)
-            root.CFrame = root.CFrame * CFrame.new(-1.5, 0, 0)
-        end
+        local ok, fired = tryInteractWithWalkRetry(pos)
+        setStatus("Pickup " .. i .. " | int=" .. tostring(fired))
 
         task.wait(CONFIG.ConfirmDelay)
         local now = countGroundPackages(pos, 22)
         if now < before then
-            packagesCollected = packagesCollected + (before - now)
             before = now
-            print("[DELIVERY] Paquete recogido (cajas en suelo: " .. now .. ")")
-            setStatus("Paquetes ~" .. packagesCollected)
+            print("[DELIVERY] Paquete recogido | suelo=" .. now)
         end
 
-        -- Si ya no hay cajas en suelo o hay pin de entrega → recogida lista
-        local pins = findSymbols("DELIVERY")
-        if #pins > 0 and now <= 1 then
-            print("[DELIVERY] Recogida CONFIRMADA (pin visible)")
+        -- Confirmación: pin de entrega aparece o cajas casi fuera
+        local del = getTarget("DELIVERY")
+        if del then
+            print("[DELIVERY] 4/4 o listo (pin visible)")
+            invalidate("PICKUP")
             return true
         end
-        if now == 0 and i >= 3 then
-            print("[DELIVERY] Recogida CONFIRMADA (sin cajas en suelo)")
+        if now == 0 and i >= 2 then
+            print("[DELIVERY] Recogida confirmada (sin cajas)")
+            invalidate("PICKUP")
             return true
         end
     end
 
-    -- Si aparece pin, aceptar y seguir
-    if #findSymbols("DELIVERY") > 0 then
-        print("[DELIVERY] Recogida asumida: pin de entrega activo")
+    if getTarget("DELIVERY") then
+        invalidate("PICKUP")
         return true
     end
 
-    print("[DELIVERY] Recogida NO confirmada del todo")
+    setStatus("ERROR_RECOVERY\nPickup sin interacción")
+    print("[DELIVERY][ERROR] Pickup: interacción no activada")
+    phase = "ERROR_RECOVERY"
     return false
 end
 
-local function doDeliveryAt(pos)
-    setStatus("Entregando...")
-    print("[DELIVERY] Llegada a delivery - interactuando")
-    lockedDeliveryPos = pos
+local function doDelivery(target)
+    local pos = target.position
+    setStatus("Delivery: " .. target.name)
+    print("[DELIVERY] Destino validado: " .. target.name)
+
     tpTo(pos)
-    task.wait(0.3)
+    task.wait(CONFIG.WaitAtTarget)
 
     for i = 1, CONFIG.MaxDeliveryTries do
         if not running then return false end
-        tpTo(pos)
-        local fired = interactNearby(pos)
-        setStatus("Entrega try " .. i .. " | prompts=" .. fired)
 
-        local root = getHRP()
-        if root then
-            root.CFrame = root.CFrame * CFrame.new(1.2, 0, 0)
-            task.wait(0.12)
-            root.CFrame = root.CFrame * CFrame.new(-1.2, 0, 0)
-        end
-
+        local ok, fired = tryInteractWithWalkRetry(pos)
+        setStatus("Entrega " .. i .. " | int=" .. tostring(fired))
         task.wait(CONFIG.ConfirmDelay)
 
-        if not pinStillNear(pos) then
-            print("[DELIVERY] Entrega CONFIRMADA (pin desapareció)")
-            setStatus("Entrega CONFIRMADA")
-            lockedDeliveryPos = nil
+        -- Confirmar: pin ya no válido
+        if not cacheEntryValid(cache.delivery) then
+            print("[DELIVERY] Entrega CONFIRMADA")
+            invalidate("DELIVERY")
+            invalidate("PICKUP") -- forzar nuevo pickup
             return true
         end
-        print("[DELIVERY] Entrega NO confirmada - reintento")
+        -- actualizar pos por si se movió
+        if cache.delivery then pos = cache.delivery.position end
     end
 
-    print("[DELIVERY] Entrega NO confirmada tras intentos")
+    setStatus("ERROR_RECOVERY\nEntrega no confirmada")
+    print("[DELIVERY][ERROR] Entrega no confirmada")
+    phase = "ERROR_RECOVERY"
     return false
 end
 
@@ -439,58 +525,42 @@ end
 local function farmLoop()
     acceptJobOnce()
     phase = "PICKUP"
-    setStatus("Fase: RECOGIDA")
+    fullScan()
 
     while running do
         if phase == "PICKUP" then
-            local list = findSymbols("PICKUP")
-            setStatus("Cajas: " .. #list)
-            if #list == 0 then
-                task.wait(1.2)
+            local target = getTarget("PICKUP")
+            if not target then
+                setStatus("Buscando caja...")
+                fullScan()
+                task.wait(0.8)
             else
-                local data = list[1]
-                print("[DELIVERY] Pickup: " .. data.name)
-                tpTo(data.position)
-                task.wait(CONFIG.WaitPickup)
-
-                local ok = doPickupAt(data.position)
-                if ok then
+                if doPickup(target) then
                     phase = "DELIVERY"
                     setStatus("Fase: ENTREGA")
-                    task.wait(0.5)
-                else
-                    setStatus("Reintentando pickup...")
-                    task.wait(0.8)
                 end
             end
 
         elseif phase == "DELIVERY" then
-            local list = findSymbols("DELIVERY")
-            setStatus("Pines: " .. #list)
-            if #list == 0 then
-                task.wait(1.2)
-                -- si no hay pin, quizá ya entregó
-                if #findSymbols("DELIVERY") == 0 and #findSymbols("PICKUP") > 0 then
-                    phase = "PICKUP"
-                end
+            local target = getTarget("DELIVERY")
+            if not target then
+                setStatus("Buscando pin...")
+                fullScan()
+                task.wait(0.8)
             else
-                local data = list[1]
-                print("[DELIVERY] Destino: " .. data.name)
-                tpTo(data.position)
-                task.wait(CONFIG.WaitDelivery)
-
-                local ok = doDeliveryAt(data.position)
-                if ok then
+                if doDelivery(target) then
                     phase = "PICKUP"
                     packagesCollected = 0
                     setStatus("Fase: RECOGIDA")
-                    task.wait(0.8)
-                else
-                    setStatus("Reintentando entrega...")
-                    -- NO cambiar de pin automáticamente; reintentar mismo ciclo
-                    task.wait(0.6)
                 end
             end
+
+        elseif phase == "ERROR_RECOVERY" then
+            setStatus("ERROR_RECOVERY\nReescaneando...")
+            invalidate(nil)
+            task.wait(1.5)
+            fullScan()
+            phase = "PICKUP"
         end
 
         task.wait(CONFIG.Between)
@@ -503,8 +573,9 @@ startBtn.MouseButton1Click:Connect(function()
     running = true
     jobAcceptedOnce = false
     phase = "PICKUP"
-    packagesCollected = 0
-    lockedDeliveryPos = nil
+    cache.pickup = nil
+    cache.delivery = nil
+    cache.lastFullScan = 0
     startBtn.Text = "EN MARCHA..."
     startBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
     task.spawn(farmLoop)
@@ -512,9 +583,12 @@ end)
 
 stopBtn.MouseButton1Click:Connect(function()
     running = false
+    local hum = getHum()
+    local root = getHRP()
+    if hum and root then hum:MoveTo(root.Position) end
     startBtn.Text = "INICIAR"
     startBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] Interacción + confirmación (sin asumir por timer)")
+print("[DELIVERY] Cache + walk retry (MoveTo)")
