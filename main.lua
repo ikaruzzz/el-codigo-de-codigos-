@@ -1,7 +1,6 @@
 --[[
-    Driving Empire - Delivery por SÍMBOLOS
-    Recogida = icono de caja 📦
-    Entrega  = icono de pin 📍
+    Driving Empire - SOLO símbolos de caja y pin
+    No busca anillos, árboles ni flechas
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -12,35 +11,32 @@ local player = Players.LocalPlayer
 
 repeat task.wait() until player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 
-if player.PlayerGui:FindFirstChild("DeliverySymbols") then
-    player.PlayerGui.DeliverySymbols:Destroy()
+if player.PlayerGui:FindFirstChild("DeliveryOnlySymbols") then
+    player.PlayerGui.DeliveryOnlySymbols:Destroy()
 end
 
 local CONFIG = {
-    WaitPickup = 3.5,
-    WaitDelivery = 3.2,
+    WaitAtSymbol = 3.5,
     Between = 1.0,
-    ScanEvery = 2,
-    MaxDistance = 6000,
+    MaxDistance = 5000,
 }
 
 local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 
 local running = false
-local phase = "PICKUP"
-local scanCounter = 0
+local phase = "PICKUP" -- PICKUP = caja | DELIVERY = pin
 local lastPos = nil
 
--- GUI
+-- GUI mínima
 local gui = Instance.new("ScreenGui")
-gui.Name = "DeliverySymbols"
+gui.Name = "DeliveryOnlySymbols"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
-panel.Size = UDim2.new(0, 210, 0, 160)
-panel.Position = UDim2.new(1, -230, 0.5, -80)
+panel.Size = UDim2.new(0, 200, 0, 150)
+panel.Position = UDim2.new(1, -220, 0.5, -75)
 panel.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 panel.BorderSizePixel = 0
 panel.Parent = gui
@@ -49,14 +45,14 @@ Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 26)
 title.BackgroundTransparency = 1
-title.Text = "Delivery · Símbolos"
+title.Text = "Solo Caja / Pin"
 title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 14
 title.Parent = panel
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -12, 0, 50)
+status.Size = UDim2.new(1, -12, 0, 45)
 status.Position = UDim2.new(0, 6, 0, 28)
 status.BackgroundTransparency = 1
 status.Text = "Detenido"
@@ -67,8 +63,8 @@ status.TextWrapped = true
 status.Parent = panel
 
 local startBtn = Instance.new("TextButton")
-startBtn.Size = UDim2.new(0, 180, 0, 32)
-startBtn.Position = UDim2.new(0.5, -90, 0, 88)
+startBtn.Size = UDim2.new(0, 170, 0, 32)
+startBtn.Position = UDim2.new(0.5, -85, 0, 80)
 startBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
 startBtn.Text = "INICIAR"
 startBtn.TextColor3 = Color3.new(1,1,1)
@@ -78,8 +74,8 @@ startBtn.Parent = panel
 Instance.new("UICorner", startBtn).CornerRadius = UDim.new(0, 8)
 
 local stopBtn = Instance.new("TextButton")
-stopBtn.Size = UDim2.new(0, 180, 0, 28)
-stopBtn.Position = UDim2.new(0.5, -90, 0, 124)
+stopBtn.Size = UDim2.new(0, 170, 0, 28)
+stopBtn.Position = UDim2.new(0.5, -85, 0, 116)
 stopBtn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
 stopBtn.Text = "DETENER"
 stopBtn.TextColor3 = Color3.new(1,1,1)
@@ -109,118 +105,88 @@ local function tryAcceptJob()
     end
 end
 
--- Obtener posición mundial de un BillboardGui / Attachment / Part
-local function getWorldPosition(obj)
-    if not obj then return nil end
+-- Posición del BillboardGui (el símbolo flotante)
+local function billboardPosition(bb)
+    if not bb or not bb:IsA("BillboardGui") then return nil end
 
-    if obj:IsA("BasePart") then
-        return obj.Position
-    end
-    if obj:IsA("Model") then
-        local p = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-        return p and p.Position
-    end
-    if obj:IsA("Attachment") then
-        return obj.WorldPosition
-    end
-    if obj:IsA("BillboardGui") then
-        if obj.Adornee then
-            if obj.Adornee:IsA("BasePart") then return obj.Adornee.Position end
-            if obj.Adornee:IsA("Attachment") then return obj.Adornee.WorldPosition end
-            if obj.Adornee:IsA("Model") then
-                local p = obj.Adornee.PrimaryPart or obj.Adornee:FindFirstChildWhichIsA("BasePart")
-                return p and p.Position
-            end
+    if bb.Adornee then
+        if bb.Adornee:IsA("BasePart") then return bb.Adornee.Position end
+        if bb.Adornee:IsA("Attachment") then return bb.Adornee.WorldPosition end
+        if bb.Adornee:IsA("Model") then
+            local p = bb.Adornee.PrimaryPart or bb.Adornee:FindFirstChildWhichIsA("BasePart")
+            return p and p.Position
         end
-        local parent = obj.Parent
-        if parent then
-            if parent:IsA("BasePart") then return parent.Position end
-            if parent:IsA("Attachment") then return parent.WorldPosition end
-            if parent:IsA("Model") then
-                local p = parent.PrimaryPart or parent:FindFirstChildWhichIsA("BasePart")
-                return p and p.Position
-            end
+    end
+
+    local par = bb.Parent
+    if par then
+        if par:IsA("BasePart") then return par.Position end
+        if par:IsA("Attachment") then return par.WorldPosition end
+        if par:IsA("Model") then
+            local p = par.PrimaryPart or par:FindFirstChildWhichIsA("BasePart")
+            return p and p.Position
         end
     end
     return nil
 end
 
-local PICKUP_KEYS = {
-    "package", "box", "parcel", "crate", "pickup", "cargo", "shipment"
-}
+--[[
+    SOLO BillboardGui que parecen iconos del Delivery:
+    - Tienen ImageLabel (el dibujo de la caja o del pin)
+    - Suelen ser AlwaysOnTop
+    - Tamaño de icono (no UI enorme)
+]]
+local function isIconBillboard(bb)
+    if not bb:IsA("BillboardGui") then return false end
+    if not bb.Enabled then return false end
 
-local DELIVERY_KEYS = {
-    "pin", "marker", "waypoint", "destination", "dropoff", "drop",
-    "deliver", "location", "objective", "goal", "finish"
-}
-
-local function nameMatches(str, keys)
-    str = string.lower(str or "")
-    for _, k in ipairs(keys) do
-        if string.find(str, k) then return true end
+    -- Debe tener al menos una imagen (el símbolo)
+    local hasImage = false
+    for _, ch in ipairs(bb:GetDescendants()) do
+        if ch:IsA("ImageLabel") or ch:IsA("ImageButton") then
+            if ch.Image ~= "" and ch.Visible ~= false then
+                hasImage = true
+                break
+            end
+        end
     end
-    return false
+    if not hasImage then return false end
+
+    -- Iconos suelen ser relativamente pequeños en studs
+    local sz = bb.Size
+    local maxAxis = math.max(sz.X.Offset, sz.Y.Offset, sz.X.Scale * 50, sz.Y.Scale * 50)
+    -- evitar billboards gigantes de decoración
+    if maxAxis > 200 then return false end
+
+    return true
 end
 
---[[
-    Busca símbolos flotantes del trabajo:
-    - BillboardGui
-    - ImageLabel / TextLabel dentro de billboards
-    - Attachments / partes asociadas al icono
-]]
-local function findSymbols(kind)
+local function collectIconBillboards()
     local root = getHRP()
     if not root then return {} end
     local rootPos = root.Position
-    local keys = (kind == "PICKUP") and PICKUP_KEYS or DELIVERY_KEYS
-    local results = {}
+    local list = {}
     local seen = {}
-    local checked = 0
+    local n = 0
 
     for _, obj in ipairs(workspace:GetDescendants()) do
-        checked += 1
-        if checked % 600 == 0 then task.wait() end
+        n += 1
+        if n % 700 == 0 then task.wait() end
 
-        local hit = false
-        local label = obj.Name
-
-        -- BillboardGui por nombre
-        if obj:IsA("BillboardGui") and nameMatches(obj.Name, keys) then
-            hit = true
-        end
-
-        -- ImageLabel / TextLabel dentro de billboard (icono)
-        if (obj:IsA("ImageLabel") or obj:IsA("ImageButton") or obj:IsA("TextLabel")) then
-            if nameMatches(obj.Name, keys) then
-                hit = true
-            end
-            -- a veces el asset no tiene nombre útil; miramos el billboard padre
-            local bb = obj:FindFirstAncestorOfClass("BillboardGui")
-            if bb and nameMatches(bb.Name, keys) then
-                hit = true
-                obj = bb
-            end
-        end
-
-        -- Attachment / Part con nombre de objetivo
-        if (obj:IsA("Attachment") or obj:IsA("BasePart")) and nameMatches(obj.Name, keys) then
-            hit = true
-        end
-
-        if hit then
-            local pos = getWorldPosition(obj)
+        if obj:IsA("BillboardGui") and isIconBillboard(obj) then
+            local pos = billboardPosition(obj)
             if pos then
                 local dist = (pos - rootPos).Magnitude
                 if dist <= CONFIG.MaxDistance then
                     local key = string.format("%.0f_%.0f_%.0f", pos.X, pos.Y, pos.Z)
                     if not seen[key] then
-                        if not (lastPos and (pos - lastPos).Magnitude < 10) then
+                        if not (lastPos and (pos - lastPos).Magnitude < 8) then
                             seen[key] = true
-                            table.insert(results, {
-                                object = obj,
+                            table.insert(list, {
+                                bb = obj,
                                 position = pos,
                                 distance = dist,
-                                name = label
+                                name = obj.Name
                             })
                         end
                     end
@@ -229,58 +195,33 @@ local function findSymbols(kind)
         end
     end
 
-    table.sort(results, function(a, b) return a.distance < b.distance end)
-    return results
+    table.sort(list, function(a, b) return a.distance < b.distance end)
+    return list
 end
 
 local function farmLoop()
     tryAcceptJob()
-    setStatus("Buscando símbolos...")
-    phase = "PICKUP"
+    setStatus("Buscando iconos...")
 
     while running do
-        scanCounter += 1
+        local icons = collectIconBillboards()
+        setStatus("Iconos encontrados: " .. #icons)
 
-        if phase == "PICKUP" then
-            local list = findSymbols("PICKUP")
-            setStatus("Cajas 📦: " .. #list)
-
-            if #list == 0 then
-                tryAcceptJob()
-                setStatus("Sin icono de caja\nReintentando...")
-                task.wait(1.5)
-            else
-                for i, data in ipairs(list) do
-                    if not running then break end
-                    lastPos = data.position
-                    setStatus("RECOGIDA " .. i .. "/" .. #list .. "\n" .. data.name)
-                    tpTo(data.position)
-                    task.wait(CONFIG.WaitPickup)
-                end
-                phase = "DELIVERY"
-                lastPos = nil
-            end
+        if #icons == 0 then
+            tryAcceptJob()
+            setStatus("Sin símbolos\nReintentando...")
+            task.wait(1.8)
         else
-            local list = findSymbols("DELIVERY")
-            setStatus("Pines 📍: " .. #list)
-
-            if #list == 0 then
-                setStatus("Sin icono de entrega\nReintentando...")
-                task.wait(1.3)
-                -- si no hay pin, volver a recogida
-                phase = "PICKUP"
-            else
-                for i, data in ipairs(list) do
-                    if not running then break end
-                    lastPos = data.position
-                    setStatus("ENTREGA " .. i .. "/" .. #list .. "\n" .. data.name)
-                    tpTo(data.position)
-                    task.wait(CONFIG.WaitDelivery)
-                end
-                phase = "PICKUP"
-                lastPos = nil
-                tryAcceptJob()
+            -- Va a cada icono de Billboard encontrado (caja y pin son de este tipo)
+            for i, data in ipairs(icons) do
+                if not running then break end
+                lastPos = data.position
+                setStatus("Símbolo " .. i .. "/" .. #icons .. "\n" .. data.name)
+                tpTo(data.position)
+                task.wait(CONFIG.WaitAtSymbol)
             end
+            lastPos = nil
+            tryAcceptJob()
         end
 
         task.wait(CONFIG.Between)
@@ -304,4 +245,4 @@ stopBtn.MouseButton1Click:Connect(function()
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] Modo símbolos: caja=recogida | pin=entrega")
+print("[DELIVERY] Solo BillboardGui con imagen (caja/pin)")
