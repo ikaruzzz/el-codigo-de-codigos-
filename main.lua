@@ -1,6 +1,7 @@
 --[[
-    Driving Empire - Delivery (versión LIGERA, menos lag)
-    Escanea poco, cachea círculos, no satura el juego
+    Driving Empire - Delivery Lite v2
+    Filtra flechas de calle y líneas de helicóptero
+    Prioriza: 1) recogida (cajas)  2) entrega (anillo sin cajas)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -16,32 +17,37 @@ if player.PlayerGui:FindFirstChild("DeliveryLite") then
 end
 
 local CONFIG = {
-    WaitInCircle = 3.0,
-    BetweenTargets = 1.2,
-    ScanEvery = 4,          -- solo reescanea cada X ciclos (importante para el lag)
-    MaxDistance = 3500,
-    MinDiameter = 12,
-    MaxDiameter = 55,
-    MaxHeight = 3.5,
+    WaitPickup = 3.2,
+    WaitDelivery = 3.0,
+    Between = 1.0,
+    ScanEvery = 3,
+    MaxDistance = 4000,
+
+    -- Anillo tipo Delivery (como tus fotos)
+    MinDiameter = 14,
+    MaxDiameter = 50,
+    MaxHeight = 2.5,
+    MaxElongation = 1.35, -- X y Z casi iguales (no líneas)
 }
 
 local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 
 local running = false
-local cachedRings = {}
+local cached = { pickup = {}, delivery = {} }
 local scanCounter = 0
+local phase = "PICKUP" -- PICKUP -> DELIVERY -> PICKUP ...
 local lastPos = nil
 
--- ====================== GUI ======================
+-- GUI
 local gui = Instance.new("ScreenGui")
 gui.Name = "DeliveryLite"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
-panel.Size = UDim2.new(0, 200, 0, 150)
-panel.Position = UDim2.new(1, -220, 0.5, -75)
+panel.Size = UDim2.new(0, 210, 0, 160)
+panel.Position = UDim2.new(1, -230, 0.5, -80)
 panel.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 panel.BorderSizePixel = 0
 panel.Parent = gui
@@ -50,14 +56,14 @@ Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 26)
 title.BackgroundTransparency = 1
-title.Text = "Delivery Lite"
+title.Text = "Delivery Lite v2"
 title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 15
 title.Parent = panel
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -12, 0, 45)
+status.Size = UDim2.new(1, -12, 0, 50)
 status.Position = UDim2.new(0, 6, 0, 28)
 status.BackgroundTransparency = 1
 status.Text = "Detenido"
@@ -68,8 +74,8 @@ status.TextWrapped = true
 status.Parent = panel
 
 local startBtn = Instance.new("TextButton")
-startBtn.Size = UDim2.new(0, 170, 0, 32)
-startBtn.Position = UDim2.new(0.5, -85, 0, 80)
+startBtn.Size = UDim2.new(0, 180, 0, 32)
+startBtn.Position = UDim2.new(0.5, -90, 0, 88)
 startBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
 startBtn.Text = "INICIAR"
 startBtn.TextColor3 = Color3.new(1,1,1)
@@ -79,8 +85,8 @@ startBtn.Parent = panel
 Instance.new("UICorner", startBtn).CornerRadius = UDim.new(0, 8)
 
 local stopBtn = Instance.new("TextButton")
-stopBtn.Size = UDim2.new(0, 170, 0, 28)
-stopBtn.Position = UDim2.new(0.5, -85, 0, 116)
+stopBtn.Size = UDim2.new(0, 180, 0, 28)
+stopBtn.Position = UDim2.new(0.5, -90, 0, 124)
 stopBtn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
 stopBtn.Text = "DETENER"
 stopBtn.TextColor3 = Color3.new(1,1,1)
@@ -89,11 +95,8 @@ stopBtn.TextSize = 12
 stopBtn.Parent = panel
 Instance.new("UICorner", stopBtn).CornerRadius = UDim.new(0, 8)
 
-local function setStatus(t)
-    status.Text = t
-end
+local function setStatus(t) status.Text = t end
 
--- ====================== UTILS ======================
 local function getHRP()
     local c = player.Character
     return c and c:FindFirstChild("HumanoidRootPart")
@@ -115,117 +118,154 @@ end
 
 local function isYellowOrange(c)
     if typeof(c) ~= "Color3" then return false end
-    return c.R > 0.6 and c.G > 0.35 and c.B < 0.45
+    return c.R > 0.55 and c.G > 0.35 and c.B < 0.5
 end
 
-local function isRing(part)
+-- Rechaza líneas, flechas de calle, marcas de heli
+local function isValidRing(part)
     local s = part.Size
     local d = math.max(s.X, s.Z)
-    return d >= CONFIG.MinDiameter and d <= CONFIG.MaxDiameter
-        and s.Y <= CONFIG.MaxHeight and math.abs(s.X - s.Z) < 10
+    local minSide = math.min(s.X, s.Z)
+
+    -- Debe ser anillo, no línea larga
+    if d < CONFIG.MinDiameter or d > CONFIG.MaxDiameter then return false end
+    if s.Y > CONFIG.MaxHeight then return false end
+    if minSide < 8 then return false end -- evita líneas finas
+    if (d / math.max(minSide, 0.1)) > CONFIG.MaxElongation then return false end
+
+    -- Nombres típicos de cosas que NO queremos
+    local n = string.lower(part.Name)
+    local p = part.Parent and string.lower(part.Parent.Name) or ""
+    if string.find(n, "arrow") or string.find(n, "heli") or string.find(n, "helipad")
+    or string.find(n, "runway") or string.find(n, "road") or string.find(n, "lane")
+    or string.find(n, "street") or string.find(n, "traffic") or string.find(n, "sign")
+    or string.find(p, "heli") or string.find(p, "airport") or string.find(p, "road") then
+        return false
+    end
+
+    return isYellowOrange(part.Color)
 end
 
--- Escaneo LENTO y por partes (no congela)
-local function scanRings()
-    local root = getHRP()
-    if not root then return {} end
+local function countPackagesNear(center, radius)
+    local n = 0
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if n >= 4 then break end
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local name = string.lower(obj.Name)
+            if string.find(name, "box") or string.find(name, "package")
+            or string.find(name, "parcel") or string.find(name, "crate") then
+                local part = obj:IsA("BasePart") and obj or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+                if part and (part.Position - center).Magnitude <= radius then
+                    n += 1
+                end
+            end
+        end
+    end
+    return n
+end
 
+local function scan()
+    local root = getHRP()
+    if not root then return { pickup = {}, delivery = {} } end
     local rootPos = root.Position
-    local found = {}
+    local pickups, deliveries = {}, {}
     local checked = 0
 
-    -- Solo mira hijos directos de carpetas grandes + un pase limitado
-    local roots = {workspace}
-    pcall(function()
-        if workspace:FindFirstChild("Game") then
-            table.insert(roots, workspace.Game)
-        end
-    end)
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        checked += 1
+        if checked % 500 == 0 then task.wait() end
 
-    for _, base in ipairs(roots) do
-        for _, obj in ipairs(base:GetDescendants()) do
-            checked += 1
-            -- Ceder el hilo cada cierto número de objetos
-            if checked % 400 == 0 then
-                task.wait()
-            end
-
-            if obj:IsA("BasePart") and isRing(obj) then
-                local dist = (obj.Position - rootPos).Magnitude
-                if dist <= CONFIG.MaxDistance and isYellowOrange(obj.Color) then
-                    local score = 40
-                    if obj.Material == Enum.Material.Neon then score += 15 end
-                    if obj.Transparency > 0.05 then score += 10 end
-
-                    table.insert(found, {
+        if obj:IsA("BasePart") and isValidRing(obj) then
+            local dist = (obj.Position - rootPos).Magnitude
+            if dist <= CONFIG.MaxDistance then
+                if lastPos and (obj.Position - lastPos).Magnitude < 12 then
+                    -- skip reciente
+                else
+                    local pkgs = countPackagesNear(obj.Position, math.max(obj.Size.X, obj.Size.Z) * 0.65)
+                    local entry = {
                         part = obj,
-                        score = score,
                         distance = dist,
+                        packages = pkgs,
                         name = obj.Name
-                    })
+                    }
+                    if pkgs >= 1 then
+                        table.insert(pickups, entry)
+                    else
+                        table.insert(deliveries, entry)
+                    end
                 end
             end
         end
     end
 
-    table.sort(found, function(a, b)
-        if a.score == b.score then return a.distance < b.distance end
-        return a.score > b.score
-    end)
+    table.sort(pickups, function(a,b) return a.distance < b.distance end)
+    table.sort(deliveries, function(a,b) return a.distance < b.distance end)
 
-    -- Máximo 8 objetivos por ciclo
-    if #found > 8 then
-        local trim = {}
-        for i = 1, 8 do trim[i] = found[i] end
-        found = trim
-    end
+    -- limitar
+    while #pickups > 5 do table.remove(pickups) end
+    while #deliveries > 5 do table.remove(deliveries) end
 
-    return found
+    return { pickup = pickups, delivery = deliveries }
 end
 
 local function farmLoop()
     tryAcceptJob()
-    setStatus("Escaneando (ligero)...")
-    task.wait(0.5)
-
-    cachedRings = scanRings()
-    setStatus("Anillos: " .. #cachedRings)
+    setStatus("Escaneando zonas...")
+    task.wait(0.4)
+    cached = scan()
+    phase = "PICKUP"
 
     while running do
         scanCounter += 1
-
-        -- Reescanear solo de vez en cuando
-        if scanCounter >= CONFIG.ScanEvery or #cachedRings == 0 then
+        if scanCounter >= CONFIG.ScanEvery then
             setStatus("Reescaneando...")
-            task.wait(0.2)
-            cachedRings = scanRings()
+            task.wait(0.15)
+            cached = scan()
             scanCounter = 0
-            setStatus("Anillos: " .. #cachedRings)
         end
 
-        if #cachedRings == 0 then
-            tryAcceptJob()
-            setStatus("Sin anillos\nEsperando...")
-            task.wait(2)
-        else
-            for i, data in ipairs(cachedRings) do
-                if not running then break end
+        if phase == "PICKUP" then
+            if #cached.pickup == 0 then
+                setStatus("Sin recogida\nBuscando...")
+                tryAcceptJob()
+                task.wait(1.5)
+                cached = scan()
+            else
+                local data = cached.pickup[1]
                 if data.part and data.part.Parent then
-                    -- Saltar si es el mismo sitio
-                    if lastPos and (data.part.Position - lastPos).Magnitude < 10 then
-                        continue
-                    end
-
                     lastPos = data.part.Position
-                    setStatus("Zona " .. i .. "/" .. #cachedRings .. "\n" .. data.name)
+                    setStatus("RECOGIDA\n" .. data.name .. " | cajas≈" .. data.packages)
                     tpTo(data.part.Position)
-                    task.wait(CONFIG.WaitInCircle)
-                    task.wait(CONFIG.BetweenTargets)
+                    task.wait(CONFIG.WaitPickup)
+                    phase = "DELIVERY"
+                    scanCounter = CONFIG.ScanEvery -- forzar reescaneo tras recogida
+                end
+            end
+        else -- DELIVERY
+            if #cached.delivery == 0 then
+                setStatus("Sin entrega\nBuscando...")
+                task.wait(1.2)
+                cached = scan()
+                -- si no hay entrega, volver a intentar recogida
+                if #cached.delivery == 0 then
+                    phase = "PICKUP"
+                end
+            else
+                local data = cached.delivery[1]
+                if data.part and data.part.Parent then
+                    lastPos = data.part.Position
+                    setStatus("ENTREGA\n" .. data.name)
+                    tpTo(data.part.Position)
+                    task.wait(CONFIG.WaitDelivery)
+                    phase = "PICKUP"
+                    lastPos = nil
+                    scanCounter = CONFIG.ScanEvery
+                    tryAcceptJob()
                 end
             end
         end
 
-        task.wait(0.5)
+        task.wait(CONFIG.Between)
     end
 
     setStatus("Detenido")
@@ -246,4 +286,4 @@ stopBtn.MouseButton1Click:Connect(function()
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] Versión lite cargada (menos lag)")
+print("[DELIVERY] Lite v2 - filtra calles/heli, prioriza recogida→entrega")
