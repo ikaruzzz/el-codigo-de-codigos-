@@ -1,7 +1,8 @@
 --[[
-    Driving Empire - Delivery Lite v2
-    Filtra flechas de calle y líneas de helicóptero
-    Prioriza: 1) recogida (cajas)  2) entrega (anillo sin cajas)
+    Driving Empire - Delivery Lite v3
+    - Solo Material Neon
+    - Ignora flechas de calle y helipad
+    - Sin límite artificial de 8 puntos
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -19,15 +20,14 @@ end
 local CONFIG = {
     WaitPickup = 3.2,
     WaitDelivery = 3.0,
-    Between = 1.0,
+    Between = 0.9,
     ScanEvery = 3,
-    MaxDistance = 4000,
+    MaxDistance = 5000,
 
-    -- Anillo tipo Delivery (como tus fotos)
     MinDiameter = 14,
-    MaxDiameter = 50,
-    MaxHeight = 2.5,
-    MaxElongation = 1.35, -- X y Z casi iguales (no líneas)
+    MaxDiameter = 48,
+    MaxHeight = 2.2,
+    MaxElongation = 1.25, -- muy redondo (no líneas)
 }
 
 local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -36,7 +36,7 @@ local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 local running = false
 local cached = { pickup = {}, delivery = {} }
 local scanCounter = 0
-local phase = "PICKUP" -- PICKUP -> DELIVERY -> PICKUP ...
+local phase = "PICKUP"
 local lastPos = nil
 
 -- GUI
@@ -56,7 +56,7 @@ Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 26)
 title.BackgroundTransparency = 1
-title.Text = "Delivery Lite v2"
+title.Text = "Delivery Lite v3"
 title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 15
@@ -121,29 +121,45 @@ local function isYellowOrange(c)
     return c.R > 0.55 and c.G > 0.35 and c.B < 0.5
 end
 
--- Rechaza líneas, flechas de calle, marcas de heli
-local function isValidRing(part)
+local BLOCK = {
+    "arrow", "heli", "helipad", "heliport", "airport", "runway",
+    "road", "lane", "street", "traffic", "sign", "marking",
+    "line", "stripe", "crosswalk", "pad"
+}
+
+local function isBlockedName(str)
+    str = string.lower(str or "")
+    for _, w in ipairs(BLOCK) do
+        if string.find(str, w) then return true end
+    end
+    return false
+end
+
+local function isValidDeliveryRing(part)
+    -- OBLIGATORIO: Neon
+    if part.Material ~= Enum.Material.Neon then
+        return false
+    end
+
+    if not isYellowOrange(part.Color) then
+        return false
+    end
+
     local s = part.Size
     local d = math.max(s.X, s.Z)
     local minSide = math.min(s.X, s.Z)
 
-    -- Debe ser anillo, no línea larga
     if d < CONFIG.MinDiameter or d > CONFIG.MaxDiameter then return false end
     if s.Y > CONFIG.MaxHeight then return false end
-    if minSide < 8 then return false end -- evita líneas finas
+    if minSide < 10 then return false end
     if (d / math.max(minSide, 0.1)) > CONFIG.MaxElongation then return false end
 
-    -- Nombres típicos de cosas que NO queremos
-    local n = string.lower(part.Name)
-    local p = part.Parent and string.lower(part.Parent.Name) or ""
-    if string.find(n, "arrow") or string.find(n, "heli") or string.find(n, "helipad")
-    or string.find(n, "runway") or string.find(n, "road") or string.find(n, "lane")
-    or string.find(n, "street") or string.find(n, "traffic") or string.find(n, "sign")
-    or string.find(p, "heli") or string.find(p, "airport") or string.find(p, "road") then
-        return false
-    end
+    -- Bloquear calle / heli por nombre
+    if isBlockedName(part.Name) then return false end
+    if part.Parent and isBlockedName(part.Parent.Name) then return false end
+    if part.Parent and part.Parent.Parent and isBlockedName(part.Parent.Parent.Name) then return false end
 
-    return isYellowOrange(part.Color)
+    return true
 end
 
 local function countPackagesNear(center, radius)
@@ -175,12 +191,10 @@ local function scan()
         checked += 1
         if checked % 500 == 0 then task.wait() end
 
-        if obj:IsA("BasePart") and isValidRing(obj) then
+        if obj:IsA("BasePart") and isValidDeliveryRing(obj) then
             local dist = (obj.Position - rootPos).Magnitude
             if dist <= CONFIG.MaxDistance then
-                if lastPos and (obj.Position - lastPos).Magnitude < 12 then
-                    -- skip reciente
-                else
+                if not (lastPos and (obj.Position - lastPos).Magnitude < 12) then
                     local pkgs = countPackagesNear(obj.Position, math.max(obj.Size.X, obj.Size.Z) * 0.65)
                     local entry = {
                         part = obj,
@@ -201,19 +215,17 @@ local function scan()
     table.sort(pickups, function(a,b) return a.distance < b.distance end)
     table.sort(deliveries, function(a,b) return a.distance < b.distance end)
 
-    -- limitar
-    while #pickups > 5 do table.remove(pickups) end
-    while #deliveries > 5 do table.remove(deliveries) end
-
+    -- SIN límite de 8: usa todos los válidos
     return { pickup = pickups, delivery = deliveries }
 end
 
 local function farmLoop()
     tryAcceptJob()
-    setStatus("Escaneando zonas...")
+    setStatus("Escaneando Neon...")
     task.wait(0.4)
     cached = scan()
     phase = "PICKUP"
+    setStatus("Recogida: " .. #cached.pickup .. " | Entrega: " .. #cached.delivery)
 
     while running do
         scanCounter += 1
@@ -222,46 +234,51 @@ local function farmLoop()
             task.wait(0.15)
             cached = scan()
             scanCounter = 0
+            setStatus("Recogida: " .. #cached.pickup .. " | Entrega: " .. #cached.delivery)
         end
 
         if phase == "PICKUP" then
             if #cached.pickup == 0 then
-                setStatus("Sin recogida\nBuscando...")
+                setStatus("Sin recogida Neon")
                 tryAcceptJob()
-                task.wait(1.5)
+                task.wait(1.4)
                 cached = scan()
             else
-                local data = cached.pickup[1]
-                if data.part and data.part.Parent then
-                    lastPos = data.part.Position
-                    setStatus("RECOGIDA\n" .. data.name .. " | cajas≈" .. data.packages)
-                    tpTo(data.part.Position)
-                    task.wait(CONFIG.WaitPickup)
-                    phase = "DELIVERY"
-                    scanCounter = CONFIG.ScanEvery -- forzar reescaneo tras recogida
+                -- recorrer TODOS los de recogida
+                for _, data in ipairs(cached.pickup) do
+                    if not running then break end
+                    if data.part and data.part.Parent then
+                        lastPos = data.part.Position
+                        setStatus("RECOGIDA\n" .. data.name .. " | cajas≈" .. data.packages)
+                        tpTo(data.part.Position)
+                        task.wait(CONFIG.WaitPickup)
+                    end
                 end
+                phase = "DELIVERY"
+                scanCounter = CONFIG.ScanEvery
             end
-        else -- DELIVERY
+        else
             if #cached.delivery == 0 then
-                setStatus("Sin entrega\nBuscando...")
+                setStatus("Sin entrega Neon")
                 task.wait(1.2)
                 cached = scan()
-                -- si no hay entrega, volver a intentar recogida
                 if #cached.delivery == 0 then
                     phase = "PICKUP"
                 end
             else
-                local data = cached.delivery[1]
-                if data.part and data.part.Parent then
-                    lastPos = data.part.Position
-                    setStatus("ENTREGA\n" .. data.name)
-                    tpTo(data.part.Position)
-                    task.wait(CONFIG.WaitDelivery)
-                    phase = "PICKUP"
-                    lastPos = nil
-                    scanCounter = CONFIG.ScanEvery
-                    tryAcceptJob()
+                for _, data in ipairs(cached.delivery) do
+                    if not running then break end
+                    if data.part and data.part.Parent then
+                        lastPos = data.part.Position
+                        setStatus("ENTREGA\n" .. data.name)
+                        tpTo(data.part.Position)
+                        task.wait(CONFIG.WaitDelivery)
+                    end
                 end
+                phase = "PICKUP"
+                lastPos = nil
+                scanCounter = CONFIG.ScanEvery
+                tryAcceptJob()
             end
         end
 
@@ -286,4 +303,4 @@ stopBtn.MouseButton1Click:Connect(function()
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] Lite v2 - filtra calles/heli, prioriza recogida→entrega")
+print("[DELIVERY] v3 | Solo Neon | Sin límite 8 | Bloquea calle/heli")
