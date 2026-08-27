@@ -1,8 +1,8 @@
 --[[
-    Driving Empire - Auto Delivery (flujo corregido)
-    Recogida: TP + caminar dentro/fuera
-    Entrega: TP directo (sin caminar desde recogida)
-    Siguiente pedido: inmediato
+    Driving Empire - Auto Delivery
+    Recogida: TP → salir/entrar círculo x2 → recoger
+    Entrega:  TP → salir/entrar círculo x2 → entregar
+    Entre puntos: solo teletransporte
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -22,12 +22,10 @@ local CONFIG = {
     InteractRadius = 18,
     WalkOutDistance = 20,
     WalkTimeout = 3.5,
-    MaxWalkRetries = 5,
-    ConfirmDelay = 0.35,
-    MaxPickupTries = 10,
-    MaxDeliveryTries = 8,
+    CircleExits = 2,        -- salir del círculo exactamente 2 veces
+    ConfirmDelay = 0.4,
     MaxDistance = 5000,
-    CacheRefresh = 2.0,
+    MaxTries = 6,
 }
 
 local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -148,7 +146,7 @@ local function acceptJobOnce()
     if startJob then
         pcall(function() startJob:FireServer("Delivery", "jobPad") end)
         pcall(function() startJob:FireServer("DeliveryDriver", "jobPad") end)
-        task.wait(0.6)
+        task.wait(0.5)
     end
     jobAcceptedOnce = true
 end
@@ -261,9 +259,7 @@ end
 local function getTarget(kind)
     local entry = (kind == "PICKUP") and cache.pickup or cache.delivery
     if cacheEntryValid(entry) then return entry end
-
     if kind == "PICKUP" then cache.pickup = nil else cache.delivery = nil end
-
     fullScan()
     entry = (kind == "PICKUP") and cache.pickup or cache.delivery
     if cacheEntryValid(entry) then return entry end
@@ -329,92 +325,99 @@ local function interactNearby(centerPos)
     return fired
 end
 
--- SOLO recogida: caminar fuera → dentro
-local function walkOutAndBack(centerPos)
+-- Salir del círculo y volver a entrar (1 vez)
+local function walkOutAndIn(centerPos, label)
     local outPos = centerPos + Vector3.new(CONFIG.WalkOutDistance, 0, 0)
-    setStatus("Caminando fuera...")
+    setStatus(label .. "\nSalir del círculo...")
     walkTo(outPos, CONFIG.WalkTimeout)
     task.wait(0.2)
-    setStatus("Caminando al centro...")
+    setStatus(label .. "\nEntrar al círculo...")
     walkTo(centerPos, CONFIG.WalkTimeout)
     task.wait(0.15)
+    interactNearby(centerPos)
+end
+
+-- Exactamente 2 salidas/entradas + interacción
+local function doTwoCircleExits(centerPos, label)
+    for i = 1, CONFIG.CircleExits do
+        if not running then return end
+        setStatus(label .. "\nSalida " .. i .. "/" .. CONFIG.CircleExits)
+        print("[DELIVERY] " .. label .. " salida " .. i)
+        walkOutAndIn(centerPos, label)
+        task.wait(CONFIG.ConfirmDelay)
+    end
 end
 
 -- ====================== RECOGIDA ======================
 local function doPickup(target)
     local pos = target.position
     setStatus("TP recogida\n" .. target.name)
-    print("[DELIVERY] TP → pickup " .. target.name)
+    print("[DELIVERY] TP → pickup")
 
-    -- 1) Teletransporte al punto de recogida
+    -- Teletransporte al punto de recogida
     tpTo(pos)
-    task.wait(0.25)
+    task.wait(0.2)
+    interactNearby(pos)
 
-    -- 2) Caminar dentro/fuera hasta que se active la recogida
-    for i = 1, CONFIG.MaxPickupTries do
-        if not running then return false end
-        setStatus("Recogida try " .. i)
+    -- Salir del círculo 2 veces (volviendo a entrar cada vez)
+    doTwoCircleExits(pos, "Recogida")
 
-        interactNearby(pos)
-        task.wait(CONFIG.ConfirmDelay)
-
-        -- ¿Ya hay punto de entrega? → recogida hecha
-        invalidate("DELIVERY") -- forzar detección fresca del pin
+    -- Comprobar si ya hay entrega (recogida hecha)
+    for _ = 1, CONFIG.MaxTries do
+        if not running then return false, nil end
+        invalidate("DELIVERY")
         local del = getTarget("DELIVERY")
         if del then
-            print("[DELIVERY] Recogida OK → pin detectado")
+            print("[DELIVERY] Recogida OK")
             invalidate("PICKUP")
             return true, del
         end
-
-        -- Si no se activó: caminar fuera/dentro (solo en recogida)
-        if i < CONFIG.MaxPickupTries then
-            walkOutAndBack(pos)
-            interactNearby(pos)
-            task.wait(CONFIG.ConfirmDelay)
-            del = getTarget("DELIVERY")
-            if del then
-                print("[DELIVERY] Recogida OK tras walk")
-                invalidate("PICKUP")
-                return true, del
-            end
-        end
+        -- una pasada extra de interacción en el centro
+        interactNearby(pos)
+        task.wait(CONFIG.ConfirmDelay)
     end
 
-    print("[DELIVERY][ERROR] Recogida no activada")
+    local del = getTarget("DELIVERY")
+    if del then
+        invalidate("PICKUP")
+        return true, del
+    end
+    print("[DELIVERY][ERROR] Recogida no confirmada")
     return false, nil
 end
 
--- ====================== ENTREGA (solo TP + interact, sin caminar) ======================
+-- ====================== ENTREGA ======================
 local function doDelivery(target)
     local pos = target.position
     setStatus("TP entrega\n" .. target.name)
-    print("[DELIVERY] TP → delivery " .. target.name)
+    print("[DELIVERY] TP → delivery (sin caminar el trayecto)")
 
-    -- Teletransporte DIRECTO (no caminar desde recogida)
+    -- Teletransporte DIRECTO (nunca caminar desde recogida)
     tpTo(pos)
-    task.wait(0.25)
+    task.wait(0.2)
+    interactNearby(pos)
 
-    for i = 1, CONFIG.MaxDeliveryTries do
+    -- Mismo patrón: salir del círculo 2 veces
+    doTwoCircleExits(pos, "Entrega")
+
+    for _ = 1, CONFIG.MaxTries do
         if not running then return false end
-        setStatus("Entrega try " .. i)
-
-        interactNearby(pos)
-        task.wait(CONFIG.ConfirmDelay)
-
-        -- Confirmación: el pin ya no es válido
         if not cacheEntryValid(cache.delivery) then
             print("[DELIVERY] Entrega CONFIRMADA")
             invalidate(nil)
             return true
         end
-        -- actualizar posición del pin si sigue
+        interactNearby(pos)
+        task.wait(CONFIG.ConfirmDelay)
         if cache.delivery then
             pos = cache.delivery.position
-            tpTo(pos) -- solo re-TP al mismo pin si hace falta, no walk
         end
     end
 
+    if not cacheEntryValid(cache.delivery) then
+        invalidate(nil)
+        return true
+    end
     print("[DELIVERY][ERROR] Entrega no confirmada")
     return false
 end
@@ -431,24 +434,21 @@ local function farmLoop()
             if not target then
                 setStatus("Buscando caja...")
                 fullScan()
-                task.wait(0.4)
+                task.wait(0.35)
             else
                 local ok, deliveryTarget = doPickup(target)
                 if ok then
-                    -- 3) Detectar entrega e ir YA (TP directo)
                     if not deliveryTarget then
                         deliveryTarget = getTarget("DELIVERY")
                     end
                     if deliveryTarget then
-                        phase = "DELIVERY"
-                        local delivered = doDelivery(deliveryTarget)
-                        if delivered then
-                            -- 4) Siguiente pedido inmediato
+                        -- TP directo a entrega
+                        if doDelivery(deliveryTarget) then
                             phase = "PICKUP"
                             setStatus("Siguiente pedido...")
                         else
-                            phase = "PICKUP"
                             invalidate(nil)
+                            phase = "PICKUP"
                         end
                     else
                         setStatus("Buscando pin...")
@@ -457,7 +457,7 @@ local function farmLoop()
                     end
                 else
                     invalidate("PICKUP")
-                    task.wait(0.3)
+                    task.wait(0.25)
                 end
             end
 
@@ -466,8 +466,7 @@ local function farmLoop()
             if not target then
                 setStatus("Buscando pin...")
                 fullScan()
-                task.wait(0.4)
-                -- si no hay pin pero hay caja, volver a pickup
+                task.wait(0.35)
                 if getTarget("PICKUP") and not getTarget("DELIVERY") then
                     phase = "PICKUP"
                 end
@@ -482,7 +481,7 @@ local function farmLoop()
             end
         end
 
-        task.wait(0.15)
+        task.wait(0.12)
     end
     setStatus("Detenido")
 end
@@ -494,7 +493,6 @@ startBtn.MouseButton1Click:Connect(function()
     phase = "PICKUP"
     cache.pickup = nil
     cache.delivery = nil
-    cache.lastFullScan = 0
     startBtn.Text = "EN MARCHA..."
     startBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
     task.spawn(farmLoop)
@@ -510,4 +508,4 @@ stopBtn.MouseButton1Click:Connect(function()
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] TP pickup → walk → TP delivery → next")
+print("[DELIVERY] TP → 2 salidas círculo (pickup y delivery)")
