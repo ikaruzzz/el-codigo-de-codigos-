@@ -1,9 +1,7 @@
 --[[
-    Driving Empire - Delivery (caja + pin)
-    - Acepta el trabajo UNA sola vez
-    - Recogida = símbolo de caja
-    - Entrega  = símbolo de pin
-    - No reinicia el trabajo en el loop
+    Driving Empire - Delivery (caja → pin → caja...)
+    Tras entregar SOLO busca la caja de nuevo
+    Ignora marcadores de policía / otros trabajos
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -30,10 +28,10 @@ local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 
 local running = false
 local jobAcceptedOnce = false
-local phase = "PICKUP" -- PICKUP | DELIVERY
+local phase = "PICKUP"
 local lastPos = nil
 
--- ====================== GUI ======================
+-- GUI
 local gui = Instance.new("ScreenGui")
 gui.Name = "DeliveryOnlySymbols"
 gui.ResetOnSpawn = false
@@ -94,7 +92,6 @@ local function setStatus(t)
     print("[DELIVERY] " .. t)
 end
 
--- ====================== UTILS ======================
 local function getHRP()
     local c = player.Character
     return c and c:FindFirstChild("HumanoidRootPart")
@@ -104,23 +101,18 @@ local function tpTo(pos)
     local root = getHRP()
     if root and pos then
         root.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
-        return true
     end
-    return false
 end
 
--- SOLO se llama una vez al iniciar
 local function acceptJobOnce()
-    if jobAcceptedOnce then
-        return
-    end
+    if jobAcceptedOnce then return end
     if startJob then
         pcall(function() startJob:FireServer("Delivery", "jobPad") end)
         pcall(function() startJob:FireServer("DeliveryDriver", "jobPad") end)
         task.wait(1)
     end
     jobAcceptedOnce = true
-    setStatus("Trabajo aceptado (solo 1 vez)")
+    setStatus("Trabajo aceptado (1 vez)")
 end
 
 local function billboardPosition(bb)
@@ -147,19 +139,31 @@ end
 
 local function isIconBillboard(bb)
     if not bb:IsA("BillboardGui") or not bb.Enabled then return false end
-    local hasImage = false
     for _, ch in ipairs(bb:GetDescendants()) do
         if (ch:IsA("ImageLabel") or ch:IsA("ImageButton")) and ch.Image ~= "" and ch.Visible ~= false then
-            hasImage = true
-            break
+            return true
         end
     end
-    return hasImage
+    return false
 end
 
--- Clasificar por nombre del billboard / hijos (caja vs pin)
+-- Palabras que NO queremos (policía y otros trabajos)
+local BLOCK = {
+    "police", "cop", "security", "officer", "sheriff",
+    "criminal", "outlaw", "jobpad", "job_pad", "job pad",
+    "arrest", "bail", "wanted", "team", "citizen"
+}
+
+local function isBlocked(blob)
+    for _, w in ipairs(BLOCK) do
+        if string.find(blob, w) then return true end
+    end
+    return false
+end
+
 local function classifySymbol(bb)
     local texts = { string.lower(bb.Name) }
+    if bb.Parent then table.insert(texts, string.lower(bb.Parent.Name)) end
     for _, ch in ipairs(bb:GetDescendants()) do
         table.insert(texts, string.lower(ch.Name))
         if ch:IsA("TextLabel") or ch:IsA("TextButton") then
@@ -168,25 +172,29 @@ local function classifySymbol(bb)
     end
     local blob = table.concat(texts, " ")
 
+    if isBlocked(blob) then
+        return "BLOCKED"
+    end
+
     local isBox =
         string.find(blob, "box") or string.find(blob, "package") or
         string.find(blob, "parcel") or string.find(blob, "crate") or
-        string.find(blob, "pickup") or string.find(blob, "cargo")
+        string.find(blob, "pickup") or string.find(blob, "cargo") or
+        string.find(blob, "shipment")
 
     local isPin =
         string.find(blob, "pin") or string.find(blob, "marker") or
         string.find(blob, "waypoint") or string.find(blob, "location") or
-        string.find(blob, "drop") or string.find(blob, "deliver") or
-        string.find(blob, "destination") or string.find(blob, "goal") or
-        string.find(blob, "objective")
+        string.find(blob, "dropoff") or string.find(blob, "drop") or
+        string.find(blob, "deliver") or string.find(blob, "destination") or
+        string.find(blob, "goal") or string.find(blob, "objective")
 
-    if isBox and not isPin then return "PICKUP" end
-    if isPin and not isBox then return "DELIVERY" end
     if isBox then return "PICKUP" end
     if isPin then return "DELIVERY" end
     return "UNKNOWN"
 end
 
+-- wantedPhase = "PICKUP" o "DELIVERY" (estricto, sin UNKNOWN)
 local function findSymbols(wantedPhase)
     local root = getHRP()
     if not root then return {} end
@@ -201,28 +209,22 @@ local function findSymbols(wantedPhase)
 
         if obj:IsA("BillboardGui") and isIconBillboard(obj) then
             local kind = classifySymbol(obj)
-            if kind == wantedPhase or (wantedPhase == "PICKUP" and kind == "UNKNOWN") then
-                -- en PICKUP permitimos UNKNOWN solo si no hay mejores;
-                -- en DELIVERY solo aceptamos clasificados como DELIVERY
-                if wantedPhase == "DELIVERY" and kind ~= "DELIVERY" then
-                    -- skip
-                else
-                    local pos = billboardPosition(obj)
-                    if pos then
-                        local dist = (pos - rootPos).Magnitude
-                        if dist <= CONFIG.MaxDistance then
-                            local key = string.format("%.0f_%.0f_%.0f", pos.X, pos.Y, pos.Z)
-                            if not seen[key] then
-                                if not (lastPos and (pos - lastPos).Magnitude < 10) then
-                                    seen[key] = true
-                                    table.insert(list, {
-                                        bb = obj,
-                                        position = pos,
-                                        distance = dist,
-                                        name = obj.Name,
-                                        kind = kind
-                                    })
-                                end
+            -- SOLO el tipo pedido (nunca UNKNOWN ni BLOCKED)
+            if kind == wantedPhase then
+                local pos = billboardPosition(obj)
+                if pos then
+                    local dist = (pos - rootPos).Magnitude
+                    if dist <= CONFIG.MaxDistance then
+                        local key = string.format("%.0f_%.0f_%.0f", pos.X, pos.Y, pos.Z)
+                        if not seen[key] then
+                            if not (lastPos and (pos - lastPos).Magnitude < 12) then
+                                seen[key] = true
+                                table.insert(list, {
+                                    position = pos,
+                                    distance = dist,
+                                    name = obj.Name,
+                                    kind = kind
+                                })
                             end
                         end
                     end
@@ -231,60 +233,41 @@ local function findSymbols(wantedPhase)
         end
     end
 
-    -- Si buscamos DELIVERY y no hay clasificados, no usar UNKNOWN (evita random)
-    if wantedPhase == "DELIVERY" then
-        local onlyDelivery = {}
-        for _, item in ipairs(list) do
-            if item.kind == "DELIVERY" then
-                table.insert(onlyDelivery, item)
-            end
-        end
-        list = onlyDelivery
-    end
-
-    -- Preferir los más cercanos
     table.sort(list, function(a, b) return a.distance < b.distance end)
     return list
 end
 
--- ====================== LOOP ======================
 local function farmLoop()
-    -- UNA sola aceptación
     acceptJobOnce()
     phase = "PICKUP"
-    setStatus("Fase: RECOGIDA (caja)")
+    setStatus("Fase: CAJA")
 
     while running do
         if phase == "PICKUP" then
             local list = findSymbols("PICKUP")
-            setStatus("Cajas: " .. #list)
+            setStatus("Buscando caja...\n(" .. #list .. ")")
 
             if #list == 0 then
-                setStatus("Esperando icono de caja...")
                 task.wait(1.5)
             else
-                -- Ir solo al más cercano (el del trabajo actual)
                 local data = list[1]
                 lastPos = data.position
                 setStatus("RECOGIDA\n" .. data.name)
                 tpTo(data.position)
                 task.wait(CONFIG.WaitPickup)
 
-                -- Pasar a entrega SIN volver a aceptar trabajo
                 phase = "DELIVERY"
                 lastPos = nil
-                setStatus("Fase: ENTREGA (pin)")
+                setStatus("Fase: PIN")
                 task.wait(0.8)
             end
 
         else -- DELIVERY
             local list = findSymbols("DELIVERY")
-            setStatus("Pines: " .. #list)
+            setStatus("Buscando pin...\n(" .. #list .. ")")
 
             if #list == 0 then
-                setStatus("Esperando icono de entrega...")
                 task.wait(1.5)
-                -- NO reinicia el trabajo; solo espera el pin
             else
                 local data = list[1]
                 lastPos = data.position
@@ -292,10 +275,10 @@ local function farmLoop()
                 tpTo(data.position)
                 task.wait(CONFIG.WaitDelivery)
 
-                -- Ciclo siguiente: otra recogida, SIN aceptar trabajo de nuevo
+                -- Volver SOLO a buscar caja (NO policía, NO aceptar job)
                 phase = "PICKUP"
                 lastPos = nil
-                setStatus("Fase: RECOGIDA (caja)")
+                setStatus("Fase: CAJA de nuevo")
                 task.wait(1)
             end
         end
@@ -309,8 +292,9 @@ end
 startBtn.MouseButton1Click:Connect(function()
     if running then return end
     running = true
-    jobAcceptedOnce = false -- solo al pulsar INICIAR de nuevo
+    jobAcceptedOnce = false
     phase = "PICKUP"
+    lastPos = nil
     startBtn.Text = "EN MARCHA..."
     startBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
     task.spawn(farmLoop)
@@ -323,4 +307,4 @@ stopBtn.MouseButton1Click:Connect(function()
     setStatus("Detenido")
 end)
 
-print("[DELIVERY] Trabajo 1 sola vez | Caja → Pin | Sin random")
+print("[DELIVERY] Tras entrega → solo caja | Bloquea policía")
