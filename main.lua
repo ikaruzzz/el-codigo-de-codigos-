@@ -1,6 +1,6 @@
 --[[
-    Driving Empire - Solo círculos de Delivery (recogida + entrega)
-    Basado en las capturas: anillo amarillo/naranja + paquetes o pin
+    Driving Empire - Delivery (versión LIGERA, menos lag)
+    Escanea poco, cachea círculos, no satura el juego
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -11,17 +11,15 @@ local player = Players.LocalPlayer
 
 repeat task.wait() until player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 
-if player.PlayerGui:FindFirstChild("DeliveryYellowCircles") then
-    player.PlayerGui.DeliveryYellowCircles:Destroy()
+if player.PlayerGui:FindFirstChild("DeliveryLite") then
+    player.PlayerGui.DeliveryLite:Destroy()
 end
 
 local CONFIG = {
-    WaitInCircle = 3.2,
-    BetweenTargets = 1.0,
-    RescanDelay = 1.5,
-    MaxDistance = 6000,
-
-    -- Anillo mediano-grande (como en las fotos)
+    WaitInCircle = 3.0,
+    BetweenTargets = 1.2,
+    ScanEvery = 4,          -- solo reescanea cada X ciclos (importante para el lag)
+    MaxDistance = 3500,
     MinDiameter = 12,
     MaxDiameter = 55,
     MaxHeight = 3.5,
@@ -31,34 +29,36 @@ local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 local startJob = remotes and remotes:FindFirstChild("RequestStartJobSession")
 
 local running = false
+local cachedRings = {}
+local scanCounter = 0
 local lastPos = nil
 
 -- ====================== GUI ======================
 local gui = Instance.new("ScreenGui")
-gui.Name = "DeliveryYellowCircles"
+gui.Name = "DeliveryLite"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
-panel.Size = UDim2.new(0, 210, 0, 155)
-panel.Position = UDim2.new(1, -230, 0.5, -80)
+panel.Size = UDim2.new(0, 200, 0, 150)
+panel.Position = UDim2.new(1, -220, 0.5, -75)
 panel.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 panel.BorderSizePixel = 0
 panel.Parent = gui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 28)
+title.Size = UDim2.new(1, 0, 0, 26)
 title.BackgroundTransparency = 1
-title.Text = "Delivery · Zonas reales"
+title.Text = "Delivery Lite"
 title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 14
+title.TextSize = 15
 title.Parent = panel
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -12, 0, 48)
-status.Position = UDim2.new(0, 6, 0, 30)
+status.Size = UDim2.new(1, -12, 0, 45)
+status.Position = UDim2.new(0, 6, 0, 28)
 status.BackgroundTransparency = 1
 status.Text = "Detenido"
 status.TextColor3 = Color3.fromRGB(180,180,190)
@@ -68,8 +68,8 @@ status.TextWrapped = true
 status.Parent = panel
 
 local startBtn = Instance.new("TextButton")
-startBtn.Size = UDim2.new(0, 180, 0, 32)
-startBtn.Position = UDim2.new(0.5, -90, 0, 85)
+startBtn.Size = UDim2.new(0, 170, 0, 32)
+startBtn.Position = UDim2.new(0.5, -85, 0, 80)
 startBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
 startBtn.Text = "INICIAR"
 startBtn.TextColor3 = Color3.new(1,1,1)
@@ -79,8 +79,8 @@ startBtn.Parent = panel
 Instance.new("UICorner", startBtn).CornerRadius = UDim.new(0, 8)
 
 local stopBtn = Instance.new("TextButton")
-stopBtn.Size = UDim2.new(0, 180, 0, 28)
-stopBtn.Position = UDim2.new(0.5, -90, 0, 121)
+stopBtn.Size = UDim2.new(0, 170, 0, 28)
+stopBtn.Position = UDim2.new(0.5, -85, 0, 116)
 stopBtn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
 stopBtn.Text = "DETENER"
 stopBtn.TextColor3 = Color3.new(1,1,1)
@@ -91,7 +91,6 @@ Instance.new("UICorner", stopBtn).CornerRadius = UDim.new(0, 8)
 
 local function setStatus(t)
     status.Text = t
-    print("[DELIVERY] " .. t)
 end
 
 -- ====================== UTILS ======================
@@ -104,150 +103,129 @@ local function tpTo(pos)
     local root = getHRP()
     if root and pos then
         root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-        return true
     end
-    return false
 end
 
 local function tryAcceptJob()
-    if not startJob then return end
-    pcall(function() startJob:FireServer("Delivery", "jobPad") end)
-    pcall(function() startJob:FireServer("DeliveryDriver", "jobPad") end)
-    task.wait(0.7)
-end
-
-local function isYellowOrange(color)
-    if typeof(color) ~= "Color3" then return false end
-    local r, g, b = color.R, color.G, color.B
-    -- Amarillo / naranja dorado (como en las fotos)
-    return r > 0.6 and g > 0.35 and b < 0.45 and r >= g * 0.85
-end
-
-local function isRingShape(part)
-    local s = part.Size
-    local diameter = math.max(s.X, s.Z)
-    return diameter >= CONFIG.MinDiameter
-        and diameter <= CONFIG.MaxDiameter
-        and s.Y <= CONFIG.MaxHeight
-        and math.abs(s.X - s.Z) < 8 -- casi redondo
-end
-
--- ¿Hay cajas/paquetes cerca? (zona de recogida)
-local function hasPackagesNearby(center, radius)
-    radius = radius or 25
-    local n = 0
-    for _, obj in pairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") then
-            local name = string.lower(obj.Name)
-            if string.find(name, "box") or string.find(name, "package")
-            or string.find(name, "parcel") or string.find(name, "crate")
-            or string.find(name, "cardboard") then
-                local part = obj:IsA("BasePart") and obj or (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart"))
-                if part and (part.Position - center).Magnitude <= radius then
-                    n += 1
-                end
-            end
-        end
+    if startJob then
+        pcall(function() startJob:FireServer("Delivery", "jobPad") end)
+        pcall(function() startJob:FireServer("DeliveryDriver", "jobPad") end)
     end
-    return n
 end
 
-local function findDeliveryRings()
+local function isYellowOrange(c)
+    if typeof(c) ~= "Color3" then return false end
+    return c.R > 0.6 and c.G > 0.35 and c.B < 0.45
+end
+
+local function isRing(part)
+    local s = part.Size
+    local d = math.max(s.X, s.Z)
+    return d >= CONFIG.MinDiameter and d <= CONFIG.MaxDiameter
+        and s.Y <= CONFIG.MaxHeight and math.abs(s.X - s.Z) < 10
+end
+
+-- Escaneo LENTO y por partes (no congela)
+local function scanRings()
     local root = getHRP()
     if not root then return {} end
+
     local rootPos = root.Position
-    local results = {}
+    local found = {}
+    local checked = 0
 
-    for _, obj in pairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and isRingShape(obj) then
-            local dist = (obj.Position - rootPos).Magnitude
-            if dist <= CONFIG.MaxDistance then
-                local score = 0
+    -- Solo mira hijos directos de carpetas grandes + un pase limitado
+    local roots = {workspace}
+    pcall(function()
+        if workspace:FindFirstChild("Game") then
+            table.insert(roots, workspace.Game)
+        end
+    end)
 
-                if isYellowOrange(obj.Color) then score += 40 end
-                if obj.Material == Enum.Material.Neon then score += 15 end
-                if obj.Transparency > 0.05 and obj.Transparency < 0.9 then score += 10 end
+    for _, base in ipairs(roots) do
+        for _, obj in ipairs(base:GetDescendants()) do
+            checked += 1
+            -- Ceder el hilo cada cierto número de objetos
+            if checked % 400 == 0 then
+                task.wait()
+            end
 
-                local packages = hasPackagesNearby(obj.Position, math.max(obj.Size.X, obj.Size.Z) * 0.7)
-                if packages >= 1 then
-                    score += 35 -- muy probable zona de recogida
-                end
+            if obj:IsA("BasePart") and isRing(obj) then
+                local dist = (obj.Position - rootPos).Magnitude
+                if dist <= CONFIG.MaxDistance and isYellowOrange(obj.Color) then
+                    local score = 40
+                    if obj.Material == Enum.Material.Neon then score += 15 end
+                    if obj.Transparency > 0.05 then score += 10 end
 
-                local name = string.lower(obj.Name)
-                local parent = obj.Parent and string.lower(obj.Parent.Name) or ""
-                if string.find(name, "circle") or string.find(name, "ring")
-                or string.find(name, "zone") or string.find(name, "marker")
-                or string.find(name, "delivery") or string.find(name, "pickup")
-                or string.find(parent, "delivery") or string.find(parent, "job") then
-                    score += 25
-                end
-
-                -- Evitar el mismo sitio que acabamos de visitar
-                if lastPos and (obj.Position - lastPos).Magnitude < 8 then
-                    score -= 20
-                end
-
-                if score >= 45 then
-                    table.insert(results, {
+                    table.insert(found, {
                         part = obj,
                         score = score,
                         distance = dist,
-                        packages = packages,
-                        name = obj.Name,
-                        kind = packages >= 1 and "PICKUP" or "DELIVERY?"
+                        name = obj.Name
                     })
                 end
             end
         end
     end
 
-    table.sort(results, function(a, b)
+    table.sort(found, function(a, b)
         if a.score == b.score then return a.distance < b.distance end
         return a.score > b.score
     end)
 
-    return results
+    -- Máximo 8 objetivos por ciclo
+    if #found > 8 then
+        local trim = {}
+        for i = 1, 8 do trim[i] = found[i] end
+        found = trim
+    end
+
+    return found
 end
 
--- ====================== LOOP ======================
 local function farmLoop()
     tryAcceptJob()
-    setStatus("Buscando anillos\nde Delivery...")
+    setStatus("Escaneando (ligero)...")
+    task.wait(0.5)
+
+    cachedRings = scanRings()
+    setStatus("Anillos: " .. #cachedRings)
 
     while running do
-        local rings = findDeliveryRings()
+        scanCounter += 1
 
-        if #rings == 0 then
-            setStatus("Sin anillos válidos\nReintentando...")
+        -- Reescanear solo de vez en cuando
+        if scanCounter >= CONFIG.ScanEvery or #cachedRings == 0 then
+            setStatus("Reescaneando...")
+            task.wait(0.2)
+            cachedRings = scanRings()
+            scanCounter = 0
+            setStatus("Anillos: " .. #cachedRings)
+        end
+
+        if #cachedRings == 0 then
             tryAcceptJob()
-            task.wait(CONFIG.RescanDelay)
+            setStatus("Sin anillos\nEsperando...")
+            task.wait(2)
         else
-            for i, data in ipairs(rings) do
+            for i, data in ipairs(cachedRings) do
                 if not running then break end
                 if data.part and data.part.Parent then
-                    lastPos = data.part.Position
-                    setStatus(string.format(
-                        "%s %d/%d\n%s | cajas≈%d",
-                        data.kind, i, #rings, data.name, data.packages
-                    ))
-
-                    tpTo(data.part.Position)
-                    task.wait(CONFIG.WaitInCircle)
-
-                    -- Micro-movimiento para activar la zona
-                    local root = getHRP()
-                    if root then
-                        root.CFrame = root.CFrame * CFrame.new(1, 0, 0)
-                        task.wait(0.25)
-                        root.CFrame = root.CFrame * CFrame.new(-1, 0, 0)
+                    -- Saltar si es el mismo sitio
+                    if lastPos and (data.part.Position - lastPos).Magnitude < 10 then
+                        continue
                     end
 
+                    lastPos = data.part.Position
+                    setStatus("Zona " .. i .. "/" .. #cachedRings .. "\n" .. data.name)
+                    tpTo(data.part.Position)
+                    task.wait(CONFIG.WaitInCircle)
                     task.wait(CONFIG.BetweenTargets)
                 end
             end
         end
 
-        task.wait(0.35)
+        task.wait(0.5)
     end
 
     setStatus("Detenido")
@@ -263,14 +241,9 @@ end)
 
 stopBtn.MouseButton1Click:Connect(function()
     running = false
-    lastPos = nil
     startBtn.Text = "INICIAR"
     startBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 80)
     setStatus("Detenido")
 end)
 
-player.CharacterAdded:Connect(function(char)
-    char:WaitForChild("HumanoidRootPart")
-end)
-
-print("[DELIVERY] Filtro de anillos amarillos/naranja listo")
+print("[DELIVERY] Versión lite cargada (menos lag)")
